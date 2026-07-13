@@ -44,6 +44,7 @@
       font-weight: 800;
       background: linear-gradient(135deg, var(--accent) 0%, #4fc3f7 100%);
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
       letter-spacing: -0.5px;
     }
@@ -426,6 +427,7 @@
       margin-bottom: 12px;
       background: linear-gradient(135deg, var(--accent) 0%, #4fc3f7 100%);
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
     }
     .brief-overview {
@@ -505,6 +507,7 @@
       font-weight: 800;
       background: linear-gradient(135deg, var(--accent) 0%, #4fc3f7 100%);
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
     }
     .mm-header {
@@ -647,7 +650,7 @@
 <div class="header">
   <div class="logo">📚 LiveWiki</div>
   <div class="tagline">AI 直播课程知识沉淀引擎</div>
-  <div class="badge">Demo v1.0</div>
+  <div class="badge">Demo v2.1 · 自动找真实链接</div>
 </div>
 
 <div class="container">
@@ -672,7 +675,17 @@
 
         <!-- URL 导入 -->
         <div id="importUrlPanel" class="import-panel active">
-          <input type="text" id="videoUrl" class="url-input" placeholder="粘贴视频 URL（支持 YouTube/B站等直链）..." />
+          <input type="text" id="videoUrl" class="url-input" placeholder="粘贴视频/活动页 URL（支持直链，或 NVIDIA/飞书 等活动落地页）..." />
+          <input type="tel" id="phoneNumber" class="url-input" placeholder="手机号（仅当该页需填手机号才能播放时填写，无需验证码，将自动填入并提交）" style="margin-top:6px;" />
+          <input type="text" id="cookieInput" class="url-input" placeholder="Cookie（可选，用于需 NVIDIA 等账号登录的页面：登录后从 DevTools→Network 复制请求头里的 Cookie 值粘贴此处）" style="margin-top:6px;" />
+          <div class="import-options">
+            <label class="checkbox-label" title="落地页/活动页里的视频链接往往不是真实地址，开启后会自动嗅探真实流地址">
+              <input type="checkbox" id="autoResolve" checked /> 🤖 自动找真实链接
+            </label>
+            <button class="btn btn-secondary btn-sm" id="resolveBtn" onclick="resolveVideoLink()">🔎 解析链接</button>
+          </div>
+          <!-- 解析出的候选真实链接（可选其一转写） -->
+          <select id="resolvedSelect" class="select-input" style="display:none; width:100%;"></select>
           <div class="import-options">
             <label class="checkbox-label">
               <input type="checkbox" id="skipDiarization" /> 跳过发言人识别
@@ -717,7 +730,7 @@
         </div>
         <div class="import-hint">
           💡 依赖: ffmpeg + faster-whisper（+ pyannote.audio 用于发言人识别）<br>
-          ⚠️ SPA 动态页面（如飞书/NVIDIA 活动页）请先在浏览器中找到视频直链或下载到本地后上传
+          🤖 勾选「自动找真实链接」后，活动落地页（如飞书/NVIDIA SCRM 页）会被自动解析出内部真实视频流地址再转写；也可点「解析链接」预览候选地址后手动选择。
         </div>
       </div>
     </div>
@@ -727,6 +740,7 @@
     </div>
     <div class="toolbar">
       <button class="btn btn-secondary" onclick="loadSample()">📄 加载示例</button>
+      <button class="btn btn-secondary" id="importTranscriptBtn" onclick="importTranscript()">📥 导入并生成</button>
       <button class="btn btn-secondary" onclick="clearInput()">🗑️ 清空</button>
       <button class="btn btn-primary" id="processBtn" onclick="processText()">⚡ 结构化处理</button>
     </div>
@@ -788,6 +802,20 @@
 </div>
 
 <script>
+// ── 全局错误守卫 ──
+// 屏蔽嵌入预览容器（CodeBuddy WebView）注入脚本产生的跨域/空节点测量错误，
+// 典型如 "Cannot read properties of null (reading 'getBoundingClientRect')"。
+// 这类错误来自预览环境本身，不影响本应用功能；对来自本页脚本的真实错误仍照常抛出。
+window.addEventListener('error', function (e) {
+  const msg = (e && e.message) || '';
+  const fromHarness = !e.filename || e.filename === '' || msg.includes('getBoundingClientRect') || msg === 'Script error.';
+  if (fromHarness) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    return false;
+  }
+}, true);
+
 let currentResult = null;
 let currentRawText = '';
 
@@ -886,7 +914,7 @@ async function transcribeFile() {
       method: 'POST',
       body: formData
     });
-    const result = await resp.json();
+    const result = await safeJson(resp);
 
     clearInterval(stageTimer);
 
@@ -920,6 +948,102 @@ function toggleImport() {
   toggle.classList.toggle('collapsed');
 }
 
+// 容错解析：后端返回非 JSON（如静态托管对 API 路由兜底返回 405 "Method Not Allowed"）时给出清晰报错
+async function safeJson(resp) {
+  const text = await resp.text();
+  if (!text) throw new Error(`服务器返回空响应（HTTP ${resp.status}）`);
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    let hint = '';
+    if (resp.status === 405) {
+      hint = '（后端 API 未生效：请通过 `node server.js` 启动本地服务，或确认 Vercel 已注册 /api 路由）';
+    }
+    throw new Error(`HTTP ${resp.status}：${text.slice(0, 80)}${hint}`);
+  }
+}
+
+// ─── 视频导入：解析真实链接（预览候选） ───
+async function resolveVideoLink() {
+  const url = document.getElementById('videoUrl').value.trim();
+  if (!url) {
+    alert('请输入页面 URL');
+    return;
+  }
+
+  const btn = document.getElementById('resolveBtn');
+  const statusEl = document.getElementById('importStatus');
+  const progress = document.getElementById('importProgress');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ 解析中...';
+  progress.style.display = 'flex';
+  progress.style.background = 'rgba(0,217,163,0.08)';
+  progress.style.borderColor = 'rgba(0,217,163,0.2)';
+  progress.style.color = 'var(--accent)';
+  statusEl.textContent = '🔎 正在嗅探页面中的真实视频链接...';
+
+  try {
+    const phone = (document.getElementById('phoneNumber').value || '').trim();
+    const cookies = (document.getElementById('cookieInput').value || '').trim();
+    const resp = await fetch('/api/resolve-video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, phone: phone || undefined, cookies: cookies || undefined })
+    });
+    const data = await safeJson(resp);
+
+    if (data.ok && data.candidates && data.candidates.length) {
+      const sel = document.getElementById('resolvedSelect');
+      sel.innerHTML = '';
+      data.candidates.forEach((c, i) => {
+        const opt = document.createElement('option');
+        opt.value = c.url;
+        const u = c.url.length > 90 ? c.url.substring(0, 90) + '...' : c.url;
+        opt.textContent = `#${i + 1} [${c.reason}] ${u}`;
+        sel.appendChild(opt);
+      });
+      sel.style.display = 'block';
+      statusEl.textContent = `✅ 找到 ${data.candidates.length} 个候选真实链接，已自动选中最可信的一个，可直接转写或手动切换`;
+    } else {
+      // 浏览器未装导致嗅探失败：给出明确安装提示，而不是笼统的“未找到”
+      if (data.method === 'browser-missing') {
+        statusEl.textContent = `❌ ${data.error}`;
+      } else {
+        statusEl.textContent = `❌ ${data.error || '未找到视频链接'}（可尝试取消「自动找真实链接」后直接转写；或确认该页无需登录/报名即可播放）`;
+        // 展示诊断线索，便于进一步定位真实链接
+        const d = data.diag;
+        if (d && (d.title || (d.iframes && d.iframes.length) || (d.hints && d.hints.length))) {
+          const box = document.createElement('div');
+          box.className = 'diag-box';
+          box.style.cssText = 'margin-top:8px;font-size:12px;color:var(--text-dim);white-space:pre-wrap;word-break:break-all;';
+          let txt = '🔍 诊断信息（可截图/复制发我协助定位）:\n';
+          if (d.title) txt += `页面标题: ${d.title}\n`;
+          if (d.iframes && d.iframes.length) txt += `iframe(${d.iframes.length}):\n  ${(d.iframes.slice(0, 5).join('\n  ') || '无')}\n`;
+          if (d.hints && d.hints.length) txt += `可疑链接(${d.hints.length}):\n  ${d.hints.slice(0, 8).join('\n  ')}\n`;
+          box.textContent = txt;
+          progress.appendChild(box);
+        }
+      }
+      progress.style.background = 'rgba(255,107,107,0.08)';
+      progress.style.borderColor = 'rgba(255,107,107,0.2)';
+      progress.style.color = 'var(--danger)';
+    }
+  } catch (e) {
+    statusEl.textContent = `❌ 解析失败: ${e.message}`;
+    progress.style.background = 'rgba(255,107,107,0.08)';
+    progress.style.borderColor = 'rgba(255,107,107,0.2)';
+    progress.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔎 解析链接';
+    // 有诊断信息时保留展示，方便复制线索；否则 3 秒后收起
+    if (!statusEl.textContent.startsWith('✅') && !progress.querySelector('.diag-box')) {
+      setTimeout(() => { progress.style.display = 'none'; }, 3000);
+    }
+  }
+}
+
 // ─── 视频导入：转写 ───
 async function transcribeVideo() {
   const url = document.getElementById('videoUrl').value.trim();
@@ -930,22 +1054,38 @@ async function transcribeVideo() {
 
   const skipDiarization = document.getElementById('skipDiarization').checked;
   const whisperModel = document.getElementById('whisperModel').value;
+  const autoResolve = document.getElementById('autoResolve').checked;
+  const phone = (document.getElementById('phoneNumber').value || '').trim();
+  const cookies = (document.getElementById('cookieInput').value || '').trim();
   const btn = document.getElementById('transcribeBtn');
   const progress = document.getElementById('importProgress');
   const statusEl = document.getElementById('importStatus');
+
+  // 若用户已在「解析链接」中选定了某个候选，则直接使用该真实链接
+  const sel = document.getElementById('resolvedSelect');
+  const resolvedUrl = (sel.style.display !== 'none' && sel.value) ? sel.value : null;
 
   btn.disabled = true;
   btn.textContent = '⏳ 转写中...';
   progress.style.display = 'flex';
 
-  // 模拟进度状态
-  const stages = [
-    { msg: '📥 下载视频中...', delay: 3000 },
-    { msg: '🎵 提取音频...', delay: 3000 },
-    { msg: '🗣️ Whisper 转写中（可能需要几分钟）...', delay: 10000 },
-    { msg: '👥 发言人识别中...', delay: 8000 },
-    { msg: '📝 生成逐字稿...', delay: 3000 },
-  ];
+  // 模拟进度状态（开启自动解析时先定位链接）
+  const stages = autoResolve && !resolvedUrl
+    ? [
+        { msg: '🔎 正在定位页面中的真实视频链接...', delay: 4000 },
+        { msg: '📥 下载视频中...', delay: 3000 },
+        { msg: '🎵 提取音频...', delay: 3000 },
+        { msg: '🗣️ Whisper 转写中（可能需要几分钟）...', delay: 10000 },
+        { msg: '👥 发言人识别中...', delay: 8000 },
+        { msg: '📝 生成逐字稿...', delay: 3000 },
+      ]
+    : [
+        { msg: '📥 下载视频中...', delay: 3000 },
+        { msg: '🎵 提取音频...', delay: 3000 },
+        { msg: '🗣️ Whisper 转写中（可能需要几分钟）...', delay: 10000 },
+        { msg: '👥 发言人识别中...', delay: 8000 },
+        { msg: '📝 生成逐字稿...', delay: 3000 },
+      ];
 
   let stageIdx = 0;
   const stageTimer = setInterval(() => {
@@ -953,23 +1093,31 @@ async function transcribeVideo() {
       statusEl.textContent = stages[stageIdx].msg;
       stageIdx++;
     }
-  }, stages[Math.min(stageIdx, stages.length-1)]?.delay || 5000);
+  }, stages[Math.min(stageIdx, stages.length - 1)]?.delay || 5000);
 
   try {
     const resp = await fetch('/api/transcribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, skipDiarization, whisperModel })
+      body: JSON.stringify({ url, skipDiarization, whisperModel, autoResolve, resolvedUrl, phone: phone || undefined, cookies: cookies || undefined })
     });
-    const result = await resp.json();
+    const result = await safeJson(resp);
 
     clearInterval(stageTimer);
 
     if (result.ok) {
       // 填入文本框
       document.getElementById('inputText').value = result.text;
-      statusEl.textContent = `✅ 转写完成！${result.word_count} 字, ${result.segment_count} 片段, ${result.speakers.length} 位发言人`;
-      
+      // 解析信息提示
+      let resolveMsg = '';
+      const r = result.resolve;
+      if (r && r.resolved) {
+        resolveMsg = `（已自动定位真实链接 · 共 ${r.candidates?.length || 0} 个候选）`;
+      } else if (r && r.error) {
+        resolveMsg = `（未能自动定位链接，已尝试原地址）`;
+      }
+      statusEl.textContent = `✅ 转写完成！${result.word_count} 字, ${result.segment_count} 片段, ${result.speakers.length} 位发言人 ${resolveMsg}`;
+
       // 显示发言人信息
       setTimeout(() => {
         progress.style.display = 'none';
@@ -980,7 +1128,7 @@ async function transcribeVideo() {
       progress.style.borderColor = 'rgba(255,107,107,0.2)';
       progress.style.color = 'var(--danger)';
     }
-  } catch(e) {
+  } catch (e) {
     clearInterval(stageTimer);
     statusEl.textContent = `❌ 请求失败: ${e.message}`;
     progress.style.background = 'rgba(255,107,107,0.08)';
@@ -996,10 +1144,33 @@ async function transcribeVideo() {
 async function loadSample() {
   try {
     const resp = await fetch('/api/sample');
-    const data = await resp.json();
+    const data = await safeJson(resp);
     document.getElementById('inputText').value = data.text;
   } catch(e) {
     console.error(e);
+  }
+}
+
+// ─── 导入本地已转写逐字稿并一键生成（/api/last-transcript → 结构化 → 摘要 → 脑图）───
+async function importTranscript() {
+  const btn = document.getElementById('importTranscriptBtn');
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 导入并生成中…'; }
+  try {
+    const resp = await fetch('/api/last-transcript');
+    const data = await safeJson(resp);
+    if (!data.ok) { alert('导入失败：' + (data.error || '未找到逐字稿')); return; }
+    document.getElementById('inputText').value = data.text;
+    // 关闭自动找链接（导入的是纯文本，无需再解析）
+    const ar = document.getElementById('autoResolve'); if (ar) ar.checked = false;
+    // processText 完成后会自动触发摘要 + 脑图生成
+    await processText();
+    alert(`已导入并生成（${data.chars} 字符逐字稿）\n文档 / 摘要 / 脑图 已全部就绪，右侧切换标签页查看。`);
+  } catch (e) {
+    console.error(e);
+    alert('导入出错：' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
   }
 }
 
@@ -1041,7 +1212,7 @@ async function processText() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text })
     });
-    const result = await resp.json();
+    const result = await safeJson(resp);
     currentResult = result;
     currentRawText = text;
     renderResult(result);
@@ -1151,7 +1322,7 @@ async function loadSummaryAndMindmap(structured, rawText) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ structured, text: rawText })
     });
-    const data = await resp.json();
+    const data = await safeJson(resp);
 
     if (data.error) throw new Error(data.error);
 

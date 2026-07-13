@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--model-path", default=None, help="本地模型路径（优先于 whisper-model）")
     parser.add_argument("--device", default="auto", help="计算设备 (auto/cpu/cuda/mps)")
     parser.add_argument("--skip-diarization", action="store_true", help="跳过发言人识别")
+    parser.add_argument("--referer", default="", help="落地页来源 URL，用作 Referer 头以绕过防盗链")
     args = parser.parse_args()
 
     if not args.url and not args.file:
@@ -64,15 +65,29 @@ def main():
             # ── URL 下载模式 ──
             # ── Step 1: 下载视频 ──
             print("==> [1/4] 下载视频...", file=sys.stderr)
+
+            # 防盗链：若提供了落地页来源，附带 Referer / Origin 头
+            ytdlp_extra = []
+            ffmpeg_headers = []
+            if args.referer:
+                ytdlp_extra += ["--add-header", f"Referer:{args.referer}"]
+                origin = args.referer
+                if "://" in origin:
+                    origin = origin.split("://", 1)[1]
+                origin = origin.split("/", 1)[0]
+                ytdlp_extra += ["--add-header", f"Origin:https://{origin}"]
+                ffmpeg_headers = ["-headers", f"Referer: {args.referer}\r\n"]
+
             result = subprocess.run(
-                [sys.executable, "-m", "yt_dlp", args.url, "-o", str(video_file), "--no-playlist", "--force-ipv4"],
+                [sys.executable, "-m", "yt_dlp", args.url, "-o", str(video_file),
+                 "--no-playlist", "--force-ipv4"] + ytdlp_extra,
                 capture_output=True, text=True, timeout=600
             )
             if result.returncode != 0:
                 # yt-dlp 可能找不到，尝试用 ffmpeg 直接下载
                 print("yt-dlp 失败，尝试 ffmpeg 直接下载...", file=sys.stderr)
                 subprocess.run(
-                    ["ffmpeg", "-i", args.url, "-c", "copy", str(video_file), "-y"],
+                    ["ffmpeg", "-i", args.url, "-c", "copy", str(video_file), "-y"] + ffmpeg_headers,
                     capture_output=True, text=True, timeout=600, check=True
                 )
 

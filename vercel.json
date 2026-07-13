@@ -4,11 +4,15 @@
   "builds": [
     { "src": "api/process.js", "use": "@vercel/node" },
     { "src": "api/sample.js", "use": "@vercel/node" },
+    { "src": "api/transcribe.mjs", "use": "@vercel/node" },
+    { "src": "api/resolve-video.mjs", "use": "@vercel/node" },
     { "src": "public/index.html", "use": "@vercel/static" }
   ],
   "routes": [
     { "src": "/api/process", "dest": "/api/process.js" },
     { "src": "/api/sample", "dest": "/api/sample.js" },
+    { "src": "/api/transcribe", "dest": "/api/transcribe.mjs" },
+    { "src": "/api/resolve-video", "dest": "/api/resolve-video.mjs" },
     { "src": "/(.*)", "dest": "/public/index.html" }
   ]
 }

@@ -15,6 +15,25 @@
 - **依赖检测**：GET `/api/transcribe/status` 检查环境是否就绪
 - **可折叠 UI**：视频导入区域可展开/收起，不干扰手动粘贴工作流
 
+### 🆕 v2.1 新增：落地页真实视频链接自动解析
+> 痛点：很多活动落地页 / SPA（如 NVIDIA SCRM 活动页、飞书、各类 H5）里的视频并非直链，而是 JS 动态注入、m3u8 切片或嵌套在第三方播放器中。直接把落地页 URL 丢给下载器往往拿不到真实视频流。
+
+- **默认自动定位**：粘贴活动页 URL 并开启「🤖 自动找真实链接」（默认开），系统会**自动解析出页面内真实的视频流地址**再转写，无需手动找直链。
+- **多策略解析器**（`scripts/resolve_video_url.js`）：
+  1. 本身已是直链 → 直接返回
+  2. `yt-dlp --get-url` 提取（YouTube / B站 / 腾讯 / 优酷 等已知平台）
+  3. Playwright 无头浏览器嗅探真实媒体网络请求（mp4 / m3u8 / webm …）、读取 `<video>` 真实 `src`、`<source>`、嵌套 `iframe` 的 `src`
+  4. 对每个嵌套 `iframe` 的 `src` 再跑 `yt-dlp`（第三方播放器常见于 iframe）
+  5. 扫描页面 API 响应体，挖掘其中内嵌的视频地址 / 第三方播放器页（活动页常把地址放在 JSON 接口里）
+  6. 静态 HTML 解析兜底（og:video、JSON-LD、video/source 标签、m3u8 链接）
+  7. 自动点击「观看 / 播放 / 直播」按钮，触发需要交互才加载的播放器（如阿里云播放器）
+- **防盗链**：解析到真实链接后，自动携带落地页来源作为 `Referer` 头传给下载器，绕过防盗链。
+- **候选预览**：点「🔎 解析链接」可只解析不转写，列出按可信度排序的候选真实地址，手动选择其一再转写。
+- **API**：
+  - `POST /api/resolve-video` `{ url }` → 返回候选真实链接列表
+  - `POST /api/transcribe` 新增 `autoResolve`（默认 `true`）、`resolvedUrl`（手动指定候选）参数，响应中附带 `resolve` 解析详情。
+- **诚实的边界**：需要登录 / 报名后才可播放、或视频由加密第三方播放器（如阿里云 VOD `playAuth`）托管的页面，无法在无人值守情况下拿到直链。此时会给出明确提示，建议用「🔎 解析链接」查看候选或提供直链。
+
 ## 🚀 快速开始
 
 ### 本地运行（完整功能）
@@ -22,6 +41,9 @@
 ```bash
 # 1. 安装依赖
 npm install
+
+# 1.1 安装 Playwright 无头浏览器（落地页自动找真实链接功能依赖）
+npx playwright install chromium
 
 # 2. 安装 Python 依赖（视频转写功能）
 pip3 install yt-dlp faster-whisper

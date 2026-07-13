@@ -25,6 +25,10 @@ process.env.PATH = (process.env.PATH || '') + ':' + extraPaths.join(':');
 
 const PORT = 3210;
 
+// ─── 视频真实链接解析（落地页 / SPA 自动定位） ────────────────────────
+// 复用与 Vercel serverless 函数相同的共享实现（scripts/server_handlers.mjs）
+import { handleTranscribe, handleResolveVideo } from './scripts/server_handlers.mjs';
+
 // ─── AI 处理管线（模拟） ────────────────────────────────────────────
 
 /**
@@ -367,87 +371,59 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // API: 从视频 URL 下载 + ASR 转写 + 说话人识别
+  // API: 获取最近一次本地转写生成的逐字稿（用于把已转好的稿直接导入页面）
+  // 路径可用环境变量 LW_TRANSCRIPT_PATH 覆盖，默认读取 transcribe.py 的输出目录
+  if (url.pathname === '/api/last-transcript' && req.method === 'GET') {
+    // 候选基目录：环境变量 > /tmp（transcribe.py 默认输出地）> 系统临时目录
+    const baseDirs = [
+      process.env.LW_TRANSCRIPT_DIR,
+      '/tmp',
+      os.tmpdir(),
+    ].filter(Boolean);
+    const names = ['transcript_with_speakers.txt', 'transcript.txt'];
+    const candidates = [];
+    for (const dir of baseDirs) {
+      for (const n of names) candidates.push(path.join(dir, 'lw_out', n));
+    }
+    if (process.env.LW_TRANSCRIPT_PATH) candidates.unshift(process.env.LW_TRANSCRIPT_PATH);
+    for (const p of candidates) {
+      try {
+        if (fs.existsSync(p)) {
+          const text = fs.readFileSync(p, 'utf8');
+          if (text.trim().length >= 10) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, text, path: p, chars: text.length }));
+            return;
+          }
+        }
+      } catch {}
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: '未找到本地逐字稿文件（默认 /tmp/lw_out/transcript_with_speakers.txt），请先完成一次转写' }));
+    return;
+  }
+
+  // API: 从视频 URL 下载 + ASR 转写 + 说话人识别（支持落地页自动定位真实链接）
+  // 逻辑复用 scripts/server_handlers.mjs（与 Vercel serverless 函数一致）
   if (url.pathname === '/api/transcribe' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
-      try {
-        const { url: videoUrl, skipDiarization, whisperModel } = JSON.parse(body);
-        if (!videoUrl || !videoUrl.trim()) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: '请提供视频 URL' }));
-          return;
-        }
+      let parsed = {};
+      try { parsed = JSON.parse(body); } catch {}
+      handleTranscribe(res, parsed);
+    });
+    return;
+  }
 
-        const scriptPath = path.join(process.cwd(), 'scripts', 'transcribe.py');
-        const outputDir = path.join(os.tmpdir(), `livewiki_transcribe_${Date.now()}`);
-        const hfToken = process.env.HF_TOKEN || '';
-
-        const args = [
-          scriptPath,
-          '--url', videoUrl,
-          '--output', outputDir,
-          '--whisper-model', whisperModel || 'small',
-        ];
-        // 优先使用本地模型
-        const localModelPath = path.join(process.cwd(), 'models', 'whisper-small');
-        if (fs.existsSync(path.join(localModelPath, 'model.bin'))) {
-          args.push('--model-path', localModelPath);
-        }
-        if (hfToken) args.push('--hf-token', hfToken);
-        if (skipDiarization) args.push('--skip-diarization');
-
-        console.log(`[transcribe] 启动 Python 脚本: python3 ${args.join(' ')}`);
-
-        const child = execFile('python3', args, {
-          timeout: 900000, // 15 分钟超时
-          maxBuffer: 10 * 1024 * 1024,
-          env: { ...process.env },
-        }, (err, stdout, stderr) => {
-          if (err && err.killed) {
-            console.error('[transcribe] 超时或被终止');
-            res.writeHead(504, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: '转写超时（超过 15 分钟），请尝试较短的音频' }));
-            return;
-          }
-          if (err) {
-            console.error('[transcribe] Python 脚本失败:', err.message);
-            console.error('[transcribe] stderr:', stderr?.substring(0, 500));
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ 
-              error: '转写失败: ' + (err.message || '未知错误'),
-              hint: '请确保已安装 yt-dlp, ffmpeg, faster-whisper',
-              stderr: stderr?.substring(0, 1000)
-            }));
-            return;
-          }
-
-          // 解析 Python 脚本输出的 JSON
-          try {
-            const result = JSON.parse(stdout.trim().split('\n').pop());
-            if (result.ok) {
-              console.log(`[transcribe] 成功: ${result.word_count} 字, ${result.segment_count} 片段`);
-              res.writeHead(200, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify(result));
-            } else {
-              res.writeHead(500, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: result.error || '转写失败' }));
-            }
-          } catch(parseErr) {
-            console.error('[transcribe] JSON 解析失败:', stdout.substring(0, 500));
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ 
-              error: '转写结果解析失败',
-              stdout: stdout.substring(0, 1000),
-              stderr: stderr?.substring(0, 1000)
-            }));
-          }
-        });
-      } catch(e) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: e.message }));
-      }
+  // API: 仅解析落地页中的真实视频链接（不下载、不转写）
+  if (url.pathname === '/api/resolve-video' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
+      let parsed = {};
+      try { parsed = JSON.parse(body); } catch {}
+      handleResolveVideo(res, parsed);
     });
     return;
   }
