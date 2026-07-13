@@ -1,0 +1,1312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LiveWiki — AI 直播课程知识沉淀引擎</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #222632;
+      --border: #2d3142;
+      --text: #e4e6ed;
+      --text-dim: #8b8fa3;
+      --accent: #00d9a3;
+      --accent-dim: #00b388;
+      --warning: #ffb347;
+      --danger: #ff6b6b;
+      --radius: 12px;
+      --shadow: 0 4px 24px rgba(0,0,0,0.3);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+
+    /* ─── Header ─── */
+    .header {
+      background: linear-gradient(135deg, #1a1d27 0%, #0f1117 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 20px 32px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .logo {
+      font-size: 24px;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--accent) 0%, #4fc3f7 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -0.5px;
+    }
+    .tagline {
+      color: var(--text-dim);
+      font-size: 14px;
+    }
+    .badge {
+      background: rgba(0,217,163,0.15);
+      color: var(--accent);
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-left: auto;
+    }
+
+    /* ─── Layout ─── */
+    .container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      padding: 24px 32px;
+      max-width: 1600px;
+      margin: 0 auto;
+      height: calc(100vh - 72px);
+    }
+
+    /* ─── Panel ─── */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      font-size: 15px;
+    }
+    .panel-header .icon { font-size: 18px; }
+    .panel-body {
+      flex: 1;
+      overflow: auto;
+      padding: 20px;
+    }
+
+    /* ─── Input ─── */
+    .input-area textarea {
+      width: 100%;
+      height: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 16px;
+      font-size: 14px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      resize: none;
+      outline: none;
+      transition: border-color 0.2s;
+      min-height: 320px;
+    }
+    .input-area textarea:focus { border-color: var(--accent); }
+
+    /* ─── Buttons ─── */
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      padding: 16px 20px;
+      border-top: 1px solid var(--border);
+    }
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #0f1117;
+    }
+    .btn-primary:hover { background: var(--accent-dim); }
+    .btn-primary:disabled {
+      background: var(--border);
+      color: var(--text-dim);
+      cursor: not-allowed;
+    }
+    .btn-secondary {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: var(--border); }
+
+    /* ─── Loading ─── */
+    .loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 16px;
+      color: var(--text-dim);
+    }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── Output ─── */
+    .output-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 12px;
+      color: var(--text-dim);
+      font-size: 15px;
+    }
+    .output-empty .big-icon { font-size: 48px; opacity: 0.5; }
+
+    /* ─── Stats ─── */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .stat-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+    }
+    .stat-label {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+    }
+    .stat-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    /* ─── TOC ─── */
+    .toc {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin-bottom: 20px;
+    }
+    .toc-title {
+      font-size: 13px;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .toc-list {
+      list-style: none;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .toc-item {
+      background: rgba(0,217,163,0.1);
+      color: var(--accent);
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toc-item:hover { background: rgba(0,217,163,0.2); }
+
+    /* ─── Section ─── */
+    .section {
+      margin-bottom: 24px;
+      border-left: 3px solid var(--accent);
+      padding-left: 16px;
+    }
+    .section-title {
+      font-size: 17px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .section-summary {
+      color: var(--text-dim);
+      font-size: 14px;
+      margin-bottom: 12px;
+      font-style: italic;
+    }
+    .key-points {
+      list-style: none;
+      margin-bottom: 12px;
+    }
+    .key-points li {
+      padding: 4px 0 4px 20px;
+      position: relative;
+      font-size: 14px;
+    }
+    .key-points li::before {
+      content: '★';
+      position: absolute;
+      left: 0;
+      color: var(--warning);
+    }
+    .section-content {
+      font-size: 14px;
+      color: var(--text);
+      opacity: 0.85;
+      white-space: pre-wrap;
+    }
+
+    /* ─── Relations ─── */
+    .relations {
+      background: rgba(79,195,247,0.08);
+      border: 1px solid rgba(79,195,247,0.2);
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 20px;
+    }
+    .relations-title {
+      font-size: 13px;
+      color: #4fc3f7;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .relation-item {
+      font-size: 13px;
+      color: var(--text-dim);
+      padding: 4px 0;
+    }
+
+    /* ─── Markdown Export ─── */
+    .markdown-view {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
+      color: var(--text);
+      max-height: 400px;
+      overflow: auto;
+    }
+
+    /* ─── Tabs ─── */
+    .tabs {
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+      padding: 0 20px;
+    }
+    .tab {
+      padding: 12px 16px;
+      cursor: pointer;
+      color: var(--text-dim);
+      font-size: 14px;
+      font-weight: 600;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* ─── Pipeline ─── */
+    .pipeline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 20px;
+      background: var(--surface2);
+      border-radius: 8px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }
+    .pipeline-step {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+    .pipeline-step.done { color: var(--accent); }
+    .pipeline-arrow { color: var(--border); font-size: 14px; }
+
+    /* ─── Import Section ─── */
+    .import-section {
+      border-bottom: 1px solid var(--border);
+      background: var(--surface2);
+    }
+    .import-header {
+      padding: 12px 20px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text-dim);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: color 0.2s;
+    }
+    .import-header:hover { color: var(--accent); }
+    .import-toggle { transition: transform 0.2s; }
+    .import-toggle.collapsed { transform: rotate(-90deg); }
+    .import-body {
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .import-body.collapsed { display: none; }
+    .url-input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 10px 14px;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .url-input:focus { border-color: var(--accent); }
+    .import-options {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    .checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--text-dim);
+      cursor: pointer;
+    }
+    .checkbox-label input { accent-color: var(--accent); }
+    .btn-sm { padding: 8px 16px; font-size: 13px; }
+
+    /* ─── Spin 动画 ─── */
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+    /* ─── 摘要卡片 ─── */
+    .brief-card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 24px;
+    }
+    .brief-title {
+      font-size: 22px;
+      font-weight: 800;
+      margin-bottom: 12px;
+      background: linear-gradient(135deg, var(--accent) 0%, #4fc3f7 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .brief-overview {
+      color: var(--text-dim);
+      font-size: 14px;
+      margin-bottom: 20px;
+      line-height: 1.8;
+    }
+    .brief-section { margin-bottom: 20px; }
+    .brief-section-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 10px;
+      color: var(--accent);
+    }
+    .brief-takeaways {
+      list-style: none;
+      padding: 0;
+    }
+    .brief-takeaways li {
+      padding: 8px 12px;
+      margin-bottom: 6px;
+      background: var(--surface2);
+      border-radius: 8px;
+      border-left: 3px solid var(--accent);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .brief-chapter {
+      display: flex;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .brief-chapter-num {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+    .brief-chapter-summary {
+      color: var(--text-dim);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    /* ─── 思维导图 ─── */
+    .mindmap-container {
+      padding: 16px;
+    }
+    .mindmap-controls {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .mindmap-tree {
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 20px;
+      overflow-x: auto;
+    }
+    .mm-node {
+      margin-left: 20px;
+      position: relative;
+    }
+    .mm-node.mm-root {
+      margin-left: 0;
+    }
+    .mm-node.mm-root > .mm-header > .mm-label {
+      font-size: 18px;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--accent) 0%, #4fc3f7 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .mm-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      cursor: default;
+      transition: background 0.15s;
+    }
+    .mm-header:hover {
+      background: var(--surface2);
+    }
+    .mm-toggle {
+      cursor: pointer;
+      font-size: 10px;
+      color: var(--text-dim);
+      width: 14px;
+      flex-shrink: 0;
+    }
+    .mm-bullet {
+      color: var(--accent);
+      width: 14px;
+      flex-shrink: 0;
+    }
+    .mm-label {
+      font-size: 14px;
+      font-weight: 600;
+    }
+    .mm-node.mm-root > .mm-header .mm-label { font-size: 18px; }
+    .mm-children .mm-node .mm-label { font-size: 13px; font-weight: 500; }
+    .mm-children .mm-children .mm-label { font-size: 12px; color: var(--text-dim); font-weight: 400; }
+    .mm-summary {
+      font-size: 11px;
+      color: var(--text-dim);
+      opacity: 0.6;
+      margin-left: 4px;
+    }
+    .select-input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 6px 10px;
+      font-size: 12px;
+      outline: none;
+      cursor: pointer;
+    }
+    .select-input:focus { border-color: var(--accent); }
+    .import-progress {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: rgba(0,217,163,0.08);
+      border: 1px solid rgba(0,217,163,0.2);
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--accent);
+    }
+    .import-hint {
+      font-size: 11px;
+      color: var(--text-dim);
+      line-height: 1.5;
+      padding: 8px 0;
+    }
+    .import-result {
+      padding: 10px 14px;
+      background: rgba(0,217,163,0.08);
+      border: 1px solid rgba(0,217,163,0.2);
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--accent);
+    }
+    .import-error {
+      padding: 10px 14px;
+      background: rgba(255,107,107,0.08);
+      border: 1px solid rgba(255,107,107,0.2);
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--danger);
+    }
+
+    /* ─── Import Tabs ─── */
+    .import-tabs {
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 12px;
+    }
+    .import-tab {
+      padding: 8px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text-dim);
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    .import-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .import-panel { display: none; }
+    .import-panel.active { display: flex; flex-direction: column; gap: 10px; }
+
+    /* ─── File Drop Zone ─── */
+    .file-drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 10px;
+      padding: 28px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      background: var(--bg);
+    }
+    .file-drop-zone:hover, .file-drop-zone.dragover {
+      border-color: var(--accent);
+      background: rgba(0,217,163,0.05);
+    }
+    .file-drop-icon { font-size: 36px; margin-bottom: 8px; }
+    .file-drop-text { font-size: 14px; color: var(--text); margin-bottom: 4px; }
+    .file-drop-hint { font-size: 12px; color: var(--text-dim); }
+    .file-drop-zone.has-file {
+      border-color: var(--accent);
+      border-style: solid;
+      background: rgba(0,217,163,0.05);
+    }
+    .file-name {
+      font-size: 13px;
+      color: var(--accent);
+      margin-top: 6px;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="logo">📚 LiveWiki</div>
+  <div class="tagline">AI 直播课程知识沉淀引擎</div>
+  <div class="badge">Demo v1.0</div>
+</div>
+
+<div class="container">
+  <!-- Left: Input -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="icon">📝</span> ASR 逐字稿输入
+    </div>
+
+    <!-- 视频导入区域 -->
+    <div class="import-section">
+      <div class="import-header" onclick="toggleImport()">
+        <span>🎬 从视频导入（自动转写 + 发言人识别）</span>
+        <span class="import-toggle" id="importToggle">▾</span>
+      </div>
+      <div class="import-body" id="importBody">
+        <!-- Tab 切换：URL / 文件上传 -->
+        <div class="import-tabs">
+          <div class="import-tab active" id="tabUrl" onclick="switchImportTab('url')">🔗 URL 下载</div>
+          <div class="import-tab" id="tabFile" onclick="switchImportTab('file')">📁 本地文件</div>
+        </div>
+
+        <!-- URL 导入 -->
+        <div id="importUrlPanel" class="import-panel active">
+          <input type="text" id="videoUrl" class="url-input" placeholder="粘贴视频 URL（支持 YouTube/B站等直链）..." />
+          <div class="import-options">
+            <label class="checkbox-label">
+              <input type="checkbox" id="skipDiarization" /> 跳过发言人识别
+            </label>
+            <select id="whisperModel" class="select-input">
+              <option value="tiny">tiny (最快)</option>
+              <option value="base">base (快)</option>
+              <option value="small" selected>small (均衡)</option>
+              <option value="medium">medium (较准)</option>
+              <option value="large-v3">large-v3 (最准/CPU很慢)</option>
+            </select>
+            <button class="btn btn-primary btn-sm" id="transcribeBtn" onclick="transcribeVideo()">🔍 开始转写</button>
+          </div>
+        </div>
+
+        <!-- 文件上传 -->
+        <div id="importFilePanel" class="import-panel">
+          <div class="file-drop-zone" id="fileDropZone" onclick="document.getElementById('videoFileInput').click()">
+            <div class="file-drop-icon">📹</div>
+            <div class="file-drop-text">点击选择或拖拽视频/音频文件到此处</div>
+            <div class="file-drop-hint">支持 mp4 / mov / avi / mkv / wav / mp3 / m4a</div>
+            <input type="file" id="videoFileInput" accept="video/*,audio/*" style="display:none;" onchange="handleFileSelect(event)" />
+          </div>
+          <div class="import-options">
+            <label class="checkbox-label">
+              <input type="checkbox" id="skipDiarizationFile" /> 跳过发言人识别
+            </label>
+            <select id="whisperModelFile" class="select-input">
+              <option value="tiny">tiny (最快)</option>
+              <option value="base">base (快)</option>
+              <option value="small" selected>small (均衡)</option>
+              <option value="medium">medium (较准)</option>
+              <option value="large-v3">large-v3 (最准/CPU很慢)</option>
+            </select>
+            <button class="btn btn-primary btn-sm" id="transcribeFileBtn" onclick="transcribeFile()" disabled>🔍 开始转写</button>
+          </div>
+        </div>
+
+        <div class="import-progress" id="importProgress" style="display:none;">
+          <div class="spinner" style="width:20px;height:20px;border-width:2px;"></div>
+          <span id="importStatus">准备中...</span>
+        </div>
+        <div class="import-hint">
+          💡 依赖: ffmpeg + faster-whisper（+ pyannote.audio 用于发言人识别）<br>
+          ⚠️ SPA 动态页面（如飞书/NVIDIA 活动页）请先在浏览器中找到视频直链或下载到本地后上传
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-body input-area" style="display:flex; flex-direction:column;">
+      <textarea id="inputText" placeholder="在此粘贴直播课程的 ASR 逐字稿...&#10;&#10;支持任意长度的中文/英文逐字稿文本。&#10;点击下方「加载示例」可快速体验。&#10;&#10;也可以使用上方的「从视频 URL 导入」功能，自动下载视频并转写。"></textarea>
+    </div>
+    <div class="toolbar">
+      <button class="btn btn-secondary" onclick="loadSample()">📄 加载示例</button>
+      <button class="btn btn-secondary" onclick="clearInput()">🗑️ 清空</button>
+      <button class="btn btn-primary" id="processBtn" onclick="processText()">⚡ 结构化处理</button>
+    </div>
+  </div>
+
+  <!-- Right: Output -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="icon">📖</span> 结构化学习文档
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('doc')">📄 文档</div>
+      <div class="tab" onclick="switchTab('summary')">✨ 摘要</div>
+      <div class="tab" onclick="switchTab('mindmap')">🧠 思维导图</div>
+      <div class="tab" onclick="switchTab('markdown')">📝 Markdown</div>
+      <div class="tab" onclick="switchTab('stats')">📊 统计</div>
+    </div>
+
+    <div class="panel-body" id="outputBody">
+      <div id="tab-doc" class="tab-content active">
+        <div class="output-empty">
+          <div class="big-icon">📚</div>
+          <div>粘贴逐字稿并点击「结构化处理」</div>
+          <div style="font-size:13px;">AI 将自动清洗、切分、结构化你的课程内容</div>
+        </div>
+      </div>
+      <div id="tab-summary" class="tab-content">
+        <div class="output-empty">
+          <div class="big-icon">✨</div>
+          <div>处理完成后，精简摘要将在此显示</div>
+        </div>
+      </div>
+      <div id="tab-mindmap" class="tab-content">
+        <div class="output-empty">
+          <div class="big-icon">🧠</div>
+          <div>处理完成后，思维导图将在此显示</div>
+        </div>
+      </div>
+      <div id="tab-markdown" class="tab-content">
+        <div class="output-empty">
+          <div class="big-icon">📝</div>
+          <div>处理完成后，Markdown 将在此显示</div>
+        </div>
+      </div>
+      <div id="tab-stats" class="tab-content">
+        <div class="output-empty">
+          <div class="big-icon">📊</div>
+          <div>处理统计数据将在此显示</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toolbar" id="exportBar" style="display:none;">
+      <button class="btn btn-secondary" onclick="copyMarkdown()">📋 复制 Markdown</button>
+      <button class="btn btn-secondary" onclick="downloadMarkdown()">⬇️ 下载 .md 文件</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentResult = null;
+let currentRawText = '';
+
+// ─── 视频导入：Tab 切换 ───
+function switchImportTab(tab) {
+  document.getElementById('tabUrl').classList.toggle('active', tab === 'url');
+  document.getElementById('tabFile').classList.toggle('active', tab === 'file');
+  document.getElementById('importUrlPanel').classList.toggle('active', tab === 'url');
+  document.getElementById('importFilePanel').classList.toggle('active', tab === 'file');
+}
+
+// ─── 视频导入：文件选择 ───
+let selectedFile = null;
+
+function handleFileSelect(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  selectedFile = file;
+  
+  const zone = document.getElementById('fileDropZone');
+  zone.classList.add('has-file');
+  zone.querySelector('.file-drop-icon').textContent = '✅';
+  zone.querySelector('.file-drop-text').textContent = '已选择文件，点击重新选择';
+  
+  // 显示文件名
+  let nameEl = zone.querySelector('.file-name');
+  if (!nameEl) {
+    nameEl = document.createElement('div');
+    nameEl.className = 'file-name';
+    zone.appendChild(nameEl);
+  }
+  nameEl.textContent = `📄 ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
+  
+  document.getElementById('transcribeFileBtn').disabled = false;
+}
+
+// 拖拽支持
+document.addEventListener('DOMContentLoaded', () => {
+  const zone = document.getElementById('fileDropZone');
+  if (!zone) return;
+  
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      document.getElementById('videoFileInput').files = e.dataTransfer.files;
+      handleFileSelect({ target: { files: [file] } });
+    }
+  });
+});
+
+// ─── 视频导入：文件转写 ───
+async function transcribeFile() {
+  if (!selectedFile) {
+    alert('请先选择视频或音频文件');
+    return;
+  }
+
+  const skipDiarization = document.getElementById('skipDiarizationFile').checked;
+  const whisperModel = document.getElementById('whisperModelFile').value;
+  const btn = document.getElementById('transcribeFileBtn');
+  const progress = document.getElementById('importProgress');
+  const statusEl = document.getElementById('importStatus');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ 转写中...';
+  progress.style.display = 'flex';
+  progress.style.background = 'rgba(0,217,163,0.08)';
+  progress.style.borderColor = 'rgba(0,217,163,0.2)';
+  progress.style.color = 'var(--accent)';
+
+  const stages = [
+    { msg: '🎵 提取音频...', delay: 2000 },
+    { msg: '🗣️ Whisper 转写中（可能需要几分钟）...', delay: 8000 },
+    { msg: '👥 发言人识别中...', delay: 8000 },
+    { msg: '📝 生成逐字稿...', delay: 3000 },
+  ];
+  let stageIdx = 0;
+  const stageTimer = setInterval(() => {
+    if (stageIdx < stages.length) {
+      statusEl.textContent = stages[stageIdx].msg;
+      stageIdx++;
+    }
+  }, stages[Math.min(stageIdx, stages.length-1)]?.delay || 5000);
+
+  try {
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    formData.append('skipDiarization', skipDiarization);
+    formData.append('whisperModel', whisperModel);
+
+    const resp = await fetch('/api/transcribe-file', {
+      method: 'POST',
+      body: formData
+    });
+    const result = await resp.json();
+
+    clearInterval(stageTimer);
+
+    if (result.ok) {
+      document.getElementById('inputText').value = result.text;
+      statusEl.textContent = `✅ 转写完成！${result.word_count} 字, ${result.segment_count} 片段, ${result.speakers.length} 位发言人`;
+      setTimeout(() => { progress.style.display = 'none'; }, 3000);
+    } else {
+      statusEl.textContent = `❌ ${result.error || '转写失败'}`;
+      progress.style.background = 'rgba(255,107,107,0.08)';
+      progress.style.borderColor = 'rgba(255,107,107,0.2)';
+      progress.style.color = 'var(--danger)';
+    }
+  } catch(e) {
+    clearInterval(stageTimer);
+    statusEl.textContent = `❌ 请求失败: ${e.message}`;
+    progress.style.background = 'rgba(255,107,107,0.08)';
+    progress.style.borderColor = 'rgba(255,107,107,0.2)';
+    progress.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 开始转写';
+  }
+}
+
+// ─── 视频导入：展开/收起 ───
+function toggleImport() {
+  const body = document.getElementById('importBody');
+  const toggle = document.getElementById('importToggle');
+  body.classList.toggle('collapsed');
+  toggle.classList.toggle('collapsed');
+}
+
+// ─── 视频导入：转写 ───
+async function transcribeVideo() {
+  const url = document.getElementById('videoUrl').value.trim();
+  if (!url) {
+    alert('请输入视频 URL');
+    return;
+  }
+
+  const skipDiarization = document.getElementById('skipDiarization').checked;
+  const whisperModel = document.getElementById('whisperModel').value;
+  const btn = document.getElementById('transcribeBtn');
+  const progress = document.getElementById('importProgress');
+  const statusEl = document.getElementById('importStatus');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ 转写中...';
+  progress.style.display = 'flex';
+
+  // 模拟进度状态
+  const stages = [
+    { msg: '📥 下载视频中...', delay: 3000 },
+    { msg: '🎵 提取音频...', delay: 3000 },
+    { msg: '🗣️ Whisper 转写中（可能需要几分钟）...', delay: 10000 },
+    { msg: '👥 发言人识别中...', delay: 8000 },
+    { msg: '📝 生成逐字稿...', delay: 3000 },
+  ];
+
+  let stageIdx = 0;
+  const stageTimer = setInterval(() => {
+    if (stageIdx < stages.length) {
+      statusEl.textContent = stages[stageIdx].msg;
+      stageIdx++;
+    }
+  }, stages[Math.min(stageIdx, stages.length-1)]?.delay || 5000);
+
+  try {
+    const resp = await fetch('/api/transcribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, skipDiarization, whisperModel })
+    });
+    const result = await resp.json();
+
+    clearInterval(stageTimer);
+
+    if (result.ok) {
+      // 填入文本框
+      document.getElementById('inputText').value = result.text;
+      statusEl.textContent = `✅ 转写完成！${result.word_count} 字, ${result.segment_count} 片段, ${result.speakers.length} 位发言人`;
+      
+      // 显示发言人信息
+      setTimeout(() => {
+        progress.style.display = 'none';
+      }, 3000);
+    } else {
+      statusEl.textContent = `❌ ${result.error || '转写失败'}`;
+      progress.style.background = 'rgba(255,107,107,0.08)';
+      progress.style.borderColor = 'rgba(255,107,107,0.2)';
+      progress.style.color = 'var(--danger)';
+    }
+  } catch(e) {
+    clearInterval(stageTimer);
+    statusEl.textContent = `❌ 请求失败: ${e.message}`;
+    progress.style.background = 'rgba(255,107,107,0.08)';
+    progress.style.borderColor = 'rgba(255,107,107,0.2)';
+    progress.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 开始转写';
+  }
+}
+
+// ─── 加载示例 ───
+async function loadSample() {
+  try {
+    const resp = await fetch('/api/sample');
+    const data = await resp.json();
+    document.getElementById('inputText').value = data.text;
+  } catch(e) {
+    console.error(e);
+  }
+}
+
+// ─── 清空 ───
+function clearInput() {
+  document.getElementById('inputText').value = '';
+  currentResult = null;
+  resetOutput();
+}
+
+// ─── 处理文本 ───
+async function processText() {
+  const text = document.getElementById('inputText').value.trim();
+  if (text.length < 10) {
+    alert('请输入至少 10 个字符的逐字稿文本');
+    return;
+  }
+
+  const btn = document.getElementById('processBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ 处理中...';
+
+  // 显示 loading
+  document.getElementById('tab-doc').innerHTML = `
+    <div class="loading">
+      <div class="spinner"></div>
+      <div>AI 正在处理逐字稿...</div>
+      <div style="font-size:12px; color:var(--text-dim);">
+        预处理 → 语义切分 → 内容结构化 → 知识关联 → 生成文档
+      </div>
+    </div>
+  `;
+  document.getElementById('tab-markdown').innerHTML = '<div class="loading"><div class="spinner"></div><div>生成中...</div></div>';
+  document.getElementById('tab-stats').innerHTML = '<div class="loading"><div class="spinner"></div><div>统计中...</div></div>';
+
+  try {
+    const resp = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    const result = await resp.json();
+    currentResult = result;
+    currentRawText = text;
+    renderResult(result);
+  } catch(e) {
+    document.getElementById('tab-doc').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>处理失败: ${e.message}</div></div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⚡ 结构化处理';
+  }
+}
+
+// ─── 渲染结果 ───
+function renderResult(result) {
+  const { stats, structured, relations, output } = result;
+
+  // 文档视图
+  let docHtml = `
+    <div class="pipeline">
+      <div class="pipeline-step done">✓ 预处理</div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step done">✓ 语义切分</div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step done">✓ 结构化</div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step done">✓ 知识关联</div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step done">✓ 生成文档</div>
+    </div>
+  `;
+
+  // 目录
+  docHtml += `<div class="toc"><div class="toc-title">📋 目录</div><div class="toc-list">`;
+  structured.forEach((s, i) => {
+    docHtml += `<div class="toc-item" onclick="scrollToSection(${i})">${i+1}. ${s.title}</div>`;
+  });
+  docHtml += `</div></div>`;
+
+  // 各章节
+  structured.forEach((s, i) => {
+    docHtml += `<div class="section" id="section-${i}">`;
+    docHtml += `<div class="section-title">${i+1}. ${s.title}</div>`;
+    docHtml += `<div class="section-summary">摘要：${s.summary}</div>`;
+    if (s.keyPoints.length > 0) {
+      docHtml += `<ul class="key-points">`;
+      s.keyPoints.forEach(kp => { docHtml += `<li>${kp}</li>`; });
+      docHtml += `</ul>`;
+    }
+    docHtml += `<div class="section-content">${s.content.join('\n\n')}</div>`;
+    docHtml += `</div>`;
+  });
+
+  // 知识关联
+  if (relations.length > 0) {
+    docHtml += `<div class="relations"><div class="relations-title">🔗 知识关联</div>`;
+    relations.forEach(r => {
+      docHtml += `<div class="relation-item">「${structured[r.from].title}」 ↔ 「${structured[r.to].title}」<br><span style="opacity:0.6">共同概念: ${r.sharedTerms.join(', ')}</span></div>`;
+    });
+    docHtml += `</div>`;
+  }
+
+  document.getElementById('tab-doc').innerHTML = docHtml;
+
+  // Markdown 视图
+  document.getElementById('tab-markdown').innerHTML = `<div class="markdown-view">${escapeHtml(output.markdown)}</div>`;
+
+  // 统计视图
+  document.getElementById('tab-stats').innerHTML = `
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">原始字数</div><div class="stat-value">${stats.originalLength}</div></div>
+      <div class="stat-card"><div class="stat-label">清洗后</div><div class="stat-value">${stats.cleanedLength}</div></div>
+      <div class="stat-card"><div class="stat-label">压缩率</div><div class="stat-value">${stats.compressionRatio}</div></div>
+      <div class="stat-card"><div class="stat-label">章节数</div><div class="stat-value">${stats.segmentCount}</div></div>
+      <div class="stat-card"><div class="stat-label">知识关联</div><div class="stat-value">${stats.relationCount}</div></div>
+      <div class="stat-card"><div class="stat-label">处理耗时</div><div class="stat-value">${stats.processingTime}ms</div></div>
+    </div>
+    <div style="color:var(--text-dim); font-size:13px; padding:16px; background:var(--surface2); border-radius:8px;">
+      <strong>💡 Token 成本估算（模拟）</strong><br><br>
+      输入: ~${Math.ceil(stats.originalLength / 1.5)} tokens<br>
+      输出: ~${Math.ceil(stats.cleanedLength / 1.5)} tokens<br>
+      预估成本: ¥${(stats.originalLength / 1.5 * 0.00001 + stats.cleanedLength / 1.5 * 0.00003).toFixed(4)}<br>
+      <br>
+      <strong>处理管线</strong><br>
+      Stage 1 预处理: 去除语气词、重复段落、口语化表达<br>
+      Stage 2 语义切分: 基于关键词的主题聚类<br>
+      Stage 3 内容结构化: 提取关键点 + 生成摘要<br>
+      Stage 4 知识关联: 跨章节词汇重叠检测<br>
+      Stage 5 输出: 生成带导航的 HTML + Markdown
+    </div>
+  `;
+
+  document.getElementById('exportBar').style.display = 'flex';
+
+  // ── 自动加载摘要 + 思维导图 ──
+  loadSummaryAndMindmap(result.structured, currentRawText);
+}
+
+// ─── 摘要 + 思维导图 ───
+let mindmapData = null;
+
+async function loadSummaryAndMindmap(structured, rawText) {
+  document.getElementById('tab-summary').innerHTML = '<div class="output-empty"><div class="big-icon" style="animation:spin 1.5s linear infinite;">⏳</div><div>正在生成精简摘要...</div></div>';
+  document.getElementById('tab-mindmap').innerHTML = '<div class="output-empty"><div class="big-icon" style="animation:spin 1.5s linear infinite;">⏳</div><div>正在生成思维导图...</div></div>';
+
+  try {
+    const resp = await fetch('/api/summarize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structured, text: rawText })
+    });
+    const data = await resp.json();
+
+    if (data.error) throw new Error(data.error);
+
+    // ── 渲染摘要 ──
+    const b = data.brief;
+    let sumHtml = `<div class="brief-card">`;
+    sumHtml += `<div class="brief-title">${b.title}</div>`;
+    sumHtml += `<div class="brief-overview">${b.overview}</div>`;
+    sumHtml += `<div class="brief-section"><div class="brief-section-title">🎯 核心要点</div><ul class="brief-takeaways">`;
+    b.keyTakeaways.forEach(kp => { sumHtml += `<li>${kp}</li>`; });
+    sumHtml += `</ul></div>`;
+    sumHtml += `<div class="brief-section"><div class="brief-section-title">📋 各章节摘要</div>`;
+    b.sectionSummaries.forEach(s => {
+      sumHtml += `<div class="brief-chapter"><span class="brief-chapter-num">${s.index}</span><div><strong>${s.title}</strong><br><span class="brief-chapter-summary">${s.summary}</span></div></div>`;
+    });
+    sumHtml += `</div></div>`;
+    document.getElementById('tab-summary').innerHTML = sumHtml;
+
+    // ── 渲染思维导图 ──
+    mindmapData = data.mindmap;
+    renderMindmap(mindmapData);
+  } catch(e) {
+    document.getElementById('tab-summary').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>摘要生成失败: ${e.message}</div></div>`;
+    document.getElementById('tab-mindmap').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>思维导图生成失败: ${e.message}</div></div>`;
+  }
+}
+
+function renderMindmap(data) {
+  const container = document.getElementById('tab-mindmap');
+  container.innerHTML = '<div class="mindmap-container"><div class="mindmap-controls"><button class="btn btn-secondary btn-sm" onclick="expandAllMindmap()">全部展开</button><button class="btn btn-secondary btn-sm" onclick="collapseAllMindmap()">全部收起</button></div><div class="mindmap-tree" id="mindmapTree"></div></div>';
+  const tree = document.getElementById('mindmapTree');
+  tree.appendChild(buildMindmapNode(data, 0));
+}
+
+function buildMindmapNode(node, depth) {
+  const div = document.createElement('div');
+  div.className = 'mm-node' + (depth === 0 ? ' mm-root' : '');
+  div.dataset.depth = depth;
+
+  const header = document.createElement('div');
+  header.className = 'mm-header';
+
+  const hasChildren = node.children && node.children.length > 0;
+  if (hasChildren && depth > 0) {
+    const toggle = document.createElement('span');
+    toggle.className = 'mm-toggle';
+    toggle.textContent = '▶';
+    toggle.onclick = (e) => {
+      e.stopPropagation();
+      const children = div.querySelector('.mm-children');
+      if (children) {
+        const isHidden = children.style.display === 'none';
+        children.style.display = isHidden ? '' : 'none';
+        toggle.textContent = isHidden ? '▼' : '▶';
+      }
+    };
+    header.appendChild(toggle);
+  } else if (depth > 0) {
+    const bullet = document.createElement('span');
+    bullet.className = 'mm-bullet';
+    bullet.textContent = '•';
+    header.appendChild(bullet);
+  }
+
+  const label = document.createElement('span');
+  label.className = 'mm-label';
+  label.textContent = node.name;
+  header.appendChild(label);
+
+  if (node.summary && depth > 0) {
+    const sum = document.createElement('span');
+    sum.className = 'mm-summary';
+    sum.textContent = node.summary.length > 60 ? node.summary.substring(0, 60) + '...' : node.summary;
+    header.appendChild(sum);
+  }
+
+  div.appendChild(header);
+
+  if (hasChildren) {
+    const children = document.createElement('div');
+    children.className = 'mm-children';
+    if (depth === 0) {
+      // 根节点默认展开
+    } else {
+      children.style.display = 'none';
+    }
+    node.children.forEach(child => {
+      children.appendChild(buildMindmapNode(child, depth + 1));
+    });
+    div.appendChild(children);
+  }
+
+  return div;
+}
+
+function expandAllMindmap() {
+  document.querySelectorAll('.mm-children').forEach(c => c.style.display = '');
+  document.querySelectorAll('.mm-toggle').forEach(t => t.textContent = '▼');
+}
+
+function collapseAllMindmap() {
+  document.querySelectorAll('.mm-children').forEach(c => {
+    if (c.parentElement.dataset.depth > 0) c.style.display = 'none';
+  });
+  document.querySelectorAll('.mm-toggle').forEach(t => {
+    if (t.parentElement.parentElement.dataset.depth > 0) t.textContent = '▶';
+  });
+}
+
+// ─── 辅助函数 ───
+function resetOutput() {
+  document.getElementById('tab-doc').innerHTML = '<div class="output-empty"><div class="big-icon">📚</div><div>粘贴逐字稿并点击「结构化处理」</div><div style="font-size:13px;">AI 将自动清洗、切分、结构化你的课程内容</div></div>';
+  document.getElementById('tab-summary').innerHTML = '<div class="output-empty"><div class="big-icon">✨</div><div>处理完成后，精简摘要将在此显示</div></div>';
+  document.getElementById('tab-mindmap').innerHTML = '<div class="output-empty"><div class="big-icon">🧠</div><div>处理完成后，思维导图将在此显示</div></div>';
+  document.getElementById('tab-markdown').innerHTML = '<div class="output-empty"><div class="big-icon">📝</div><div>处理完成后，Markdown 将在此显示</div></div>';
+  document.getElementById('tab-stats').innerHTML = '<div class="output-empty"><div class="big-icon">📊</div><div>处理统计数据将在此显示</div></div>';
+  document.getElementById('exportBar').style.display = 'none';
+}
+
+function switchTab(name) {
+  const tabs = ['doc','summary','mindmap','markdown','stats'];
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', tabs[i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+function scrollToSection(i) {
+  const el = document.getElementById('section-' + i);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function copyMarkdown() {
+  if (!currentResult) return;
+  navigator.clipboard.writeText(currentResult.output.markdown).then(() => {
+    alert('Markdown 已复制到剪贴板！');
+  });
+}
+
+function downloadMarkdown() {
+  if (!currentResult) return;
+  const blob = new Blob([currentResult.output.markdown], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'LiveWiki_结构化文档.md';
+  a.click();
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,8 @@
+node_modules/
+.env
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+# Whisper 模型太大，请手动下载或使用 --model-path 参数指定
+models/

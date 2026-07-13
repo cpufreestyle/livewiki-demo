@@ -1,0 +1,17 @@
+{
+  "name": "livewiki-demo",
+  "version": "1.0.0",
+  "description": "LiveWiki — AI 直播课程知识沉淀引擎 Demo",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}

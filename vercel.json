@@ -1,0 +1,14 @@
+{
+  "name": "livewiki-demo",
+  "version": 2,
+  "builds": [
+    { "src": "api/process.js", "use": "@vercel/node" },
+    { "src": "api/sample.js", "use": "@vercel/node" },
+    { "src": "public/index.html", "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "src": "/api/process", "dest": "/api/process.js" },
+    { "src": "/api/sample", "dest": "/api/sample.js" },
+    { "src": "/(.*)", "dest": "/public/index.html" }
+  ]
+}
