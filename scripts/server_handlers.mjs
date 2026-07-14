@@ -27,6 +27,47 @@ function json(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// ─── 自动导出转写结果到 Obsidian wiki 目录 ──────────────────────────
+// 由环境变量 LW_WIKI_DIR 控制（未设置则不导出）。生成带 frontmatter 的 .md，
+// Obsidian 可直接索引。文件名基于标题/时间戳，非法字符会被替换。
+export function exportToWiki(result, sourceUrl, title = '') {
+  const wikiDir = process.env.LW_WIKI_DIR;
+  if (!wikiDir) return null;
+  try {
+    if (!fs.existsSync(wikiDir)) fs.mkdirSync(wikiDir, { recursive: true });
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_` +
+      `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const durationMin = result.duration ? (result.duration / 60).toFixed(1) : '未知';
+    const safe = (s) => String(s).replace(/[\\/:*?"<>|\n\r]/g, '_').trim().slice(0, 80);
+    const baseName = safe(title || `LiveWiki_转写_${stamp}`) || `LiveWiki_转写_${stamp}`;
+    // 避免覆盖同名文件
+    let filePath = path.join(wikiDir, `${baseName}.md`);
+    let i = 1;
+    while (fs.existsSync(filePath)) { filePath = path.join(wikiDir, `${baseName}_${i++}.md`); }
+    const fm = [
+      '---',
+      `title: "${baseName}"`,
+      `source: "${sourceUrl || ''}"`,
+      `duration_min: ${durationMin}`,
+      `word_count: ${result.word_count || 0}`,
+      `segment_count: ${result.segment_count || 0}`,
+      `created: ${now.toISOString()}`,
+      'tags: [livewiki, transcript]',
+      '---',
+      '',
+      `# ${baseName}`,
+      '',
+    ].join('\n');
+    fs.writeFileSync(filePath, fm + (result.text || ''), 'utf8');
+    return filePath;
+  } catch (e) {
+    console.error('[wiki-export] 导出失败:', e.message);
+    return null;
+  }
+}
+
 // ─── 仅解析落地页中的真实视频链接（不下载、不转写） ─────────────────
 export async function handleResolveVideo(res, body) {
   const pageUrl = body?.url;
@@ -45,7 +86,7 @@ export async function handleResolveVideo(res, body) {
 // ─── 从视频 URL 下载 + ASR 转写 + 说话人识别 ───────────────────────
 // 支持落地页 / SPA：默认自动定位页面内真实视频链接后再转写
 export async function handleTranscribe(res, body) {
-  const { url: videoUrl, skipDiarization, whisperModel, autoResolve, resolvedUrl, cookies, phone } = body || {};
+  const { url: videoUrl, skipDiarization, whisperModel, autoResolve, resolvedUrl, cookies, phone, title } = body || {};
   if (!videoUrl || !videoUrl.trim()) {
     json(res, 400, { error: '请提供视频 URL' });
     return;
@@ -140,6 +181,12 @@ export async function handleTranscribe(res, body) {
       result.resolve = resolveInfo;
       if (result.ok) {
         console.log(`[transcribe] 成功: ${result.word_count} 字, ${result.segment_count} 片段`);
+        // 自动导出到 Obsidian wiki（若配置了 LW_WIKI_DIR）
+        const wikiPath = exportToWiki(result, videoUrl, title);
+        if (wikiPath) {
+          result.wikiExport = wikiPath;
+          console.log(`[transcribe] 已自动导出到 wiki: ${wikiPath}`);
+        }
         json(res, 200, result);
       } else {
         json(res, 500, { error: result.error || '转写失败', resolve: resolveInfo });

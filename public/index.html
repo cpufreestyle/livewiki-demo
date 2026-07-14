@@ -495,6 +495,15 @@
       padding: 20px;
       overflow-x: auto;
     }
+    .mindmap-svg-wrap {
+      background: var(--surface);
+      border-radius: var(--radius);
+      padding: 16px;
+      overflow: auto;
+      display: flex;
+      justify-content: center;
+    }
+    .mindmap-svg-wrap svg { max-width: 100%; height: auto; }
     .mm-node {
       margin-left: 20px;
       position: relative;
@@ -1352,84 +1361,111 @@ async function loadSummaryAndMindmap(structured, rawText) {
 
 function renderMindmap(data) {
   const container = document.getElementById('tab-mindmap');
-  container.innerHTML = '<div class="mindmap-container"><div class="mindmap-controls"><button class="btn btn-secondary btn-sm" onclick="expandAllMindmap()">全部展开</button><button class="btn btn-secondary btn-sm" onclick="collapseAllMindmap()">全部收起</button></div><div class="mindmap-tree" id="mindmapTree"></div></div>';
-  const tree = document.getElementById('mindmapTree');
-  tree.appendChild(buildMindmapNode(data, 0));
+  container.innerHTML =
+    '<div class="mindmap-container"><div class="mindmap-controls">' +
+    '<button class="btn btn-secondary btn-sm" onclick="downloadMindmap(\'svg\')">⬇️ 下载 SVG</button>' +
+    '<button class="btn btn-primary btn-sm" onclick="downloadMindmap(\'png\')">⬇️ 下载 PNG</button>' +
+    '</div><div id="mindmapSvgWrap" class="mindmap-svg-wrap"></div></div>';
+  document.getElementById('mindmapSvgWrap').innerHTML = buildMindmapSvg(data);
 }
 
-function buildMindmapNode(node, depth) {
-  const div = document.createElement('div');
-  div.className = 'mm-node' + (depth === 0 ? ' mm-root' : '');
-  div.dataset.depth = depth;
+function buildMindmapSvg(root) {
+  const NODE_H = 46, H_GAP = 64, V_GAP = 14, PAD_X = 14;
+  const FONT = "system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif";
+  const palette = ['#6366f1','#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6'];
+  const textW = (s) => { let w = 0; for (const ch of (s||'')) w += /[\x00-\xff]/.test(ch) ? 8 : 15; return w; };
+  const nodeW = (n) => Math.max(90, Math.min(280, textW(n.name || '') + PAD_X * 2));
 
-  const header = document.createElement('div');
-  header.className = 'mm-header';
-
-  const hasChildren = node.children && node.children.length > 0;
-  if (hasChildren && depth > 0) {
-    const toggle = document.createElement('span');
-    toggle.className = 'mm-toggle';
-    toggle.textContent = '▶';
-    toggle.onclick = (e) => {
-      e.stopPropagation();
-      const children = div.querySelector('.mm-children');
-      if (children) {
-        const isHidden = children.style.display === 'none';
-        children.style.display = isHidden ? '' : 'none';
-        toggle.textContent = isHidden ? '▼' : '▶';
-      }
-    };
-    header.appendChild(toggle);
-  } else if (depth > 0) {
-    const bullet = document.createElement('span');
-    bullet.className = 'mm-bullet';
-    bullet.textContent = '•';
-    header.appendChild(bullet);
+  function measure(n) {
+    n.w = nodeW(n);
+    const kids = n.children || [];
+    if (!kids.length) { n.h = NODE_H; return n.h; }
+    let total = 0;
+    kids.forEach((c, i) => { total += measure(c); if (i) total += V_GAP; });
+    n.h = Math.max(NODE_H, total);
+    return n.h;
   }
+  measure(root);
 
-  const label = document.createElement('span');
-  label.className = 'mm-label';
-  label.textContent = node.name;
-  header.appendChild(label);
-
-  if (node.summary && depth > 0) {
-    const sum = document.createElement('span');
-    sum.className = 'mm-summary';
-    sum.textContent = node.summary.length > 60 ? node.summary.substring(0, 60) + '...' : node.summary;
-    header.appendChild(sum);
-  }
-
-  div.appendChild(header);
-
-  if (hasChildren) {
-    const children = document.createElement('div');
-    children.className = 'mm-children';
-    if (depth === 0) {
-      // 根节点默认展开
-    } else {
-      children.style.display = 'none';
+  let maxX = 0, maxY = 0;
+  function place(n, x, yTop) {
+    n.x = x; n.y = yTop + n.h / 2;
+    maxX = Math.max(maxX, x + n.w); maxY = Math.max(maxY, yTop + n.h);
+    const kids = n.children || [];
+    if (kids.length) {
+      const cx = x + n.w + H_GAP;
+      let cur = yTop;
+      kids.forEach(c => { place(c, cx, cur); cur += c.h + V_GAP; });
     }
-    node.children.forEach(child => {
-      children.appendChild(buildMindmapNode(child, depth + 1));
-    });
-    div.appendChild(children);
   }
+  place(root, 20, 20);
 
-  return div;
+  const W = maxX + 40, H = maxY + 40;
+  const colorOf = (d) => d === 0 ? '#6366f1' : palette[(d - 1) % palette.length];
+  let nodes = '', edges = '';
+  (function walk(n, depth) {
+    const col = colorOf(depth);
+    const y = n.y - NODE_H / 2;
+    const isRoot = depth === 0;
+    nodes += '<g>';
+    nodes += '<rect x="' + n.x + '" y="' + y + '" width="' + n.w + '" height="' + NODE_H + '" rx="10" ry="10" fill="' + (isRoot ? col : '#ffffff') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 2.5 : 1.5) + '"' + (isRoot ? '' : ' fill-opacity="0.05"') + '/>';
+    const label = (n.name || '').length > 22 ? (n.name || '').slice(0, 21) + '…' : (n.name || '');
+    nodes += '<text x="' + (n.x + PAD_X) + '" y="' + (n.y + 5) + '" font-family="' + FONT + '" font-size="' + (isRoot ? 15 : 13) + '" font-weight="' + (isRoot ? 800 : 600) + '" fill="' + (isRoot ? '#ffffff' : '#1f2937') + '">' + escapeXml(label) + '</text>';
+    if (n.summary && depth > 0) {
+      const sum = n.summary.length > 26 ? n.summary.slice(0, 25) + '…' : n.summary;
+      nodes += '<text x="' + (n.x + PAD_X) + '" y="' + (n.y + 23) + '" font-family="' + FONT + '" font-size="11" fill="#64748b">' + escapeXml(sum) + '</text>';
+    }
+    nodes += '</g>';
+    (n.children || []).forEach(c => {
+      const x1 = n.x + n.w, y1 = n.y, x2 = c.x, y2 = c.y, mx = (x1 + x2) / 2;
+      edges += '<path d="M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2 + '" fill="none" stroke="' + col + '" stroke-width="1.5" stroke-opacity="0.5"/>';
+    });
+    (n.children || []).forEach(c => walk(c, depth + 1));
+  })(root, 0);
+
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" font-family="' + FONT + '">' +
+    '<rect width="100%" height="100%" fill="#ffffff"/>' + edges + nodes + '</svg>';
 }
 
-function expandAllMindmap() {
-  document.querySelectorAll('.mm-children').forEach(c => c.style.display = '');
-  document.querySelectorAll('.mm-toggle').forEach(t => t.textContent = '▼');
+function escapeXml(s) {
+  return String(s).replace(/[<>&'"]/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;',"'":'&apos;','"':'&quot;' }[c]));
 }
 
-function collapseAllMindmap() {
-  document.querySelectorAll('.mm-children').forEach(c => {
-    if (c.parentElement.dataset.depth > 0) c.style.display = 'none';
-  });
-  document.querySelectorAll('.mm-toggle').forEach(t => {
-    if (t.parentElement.parentElement.dataset.depth > 0) t.textContent = '▶';
-  });
+function downloadMindmap(fmt) {
+  const svg = document.querySelector('#mindmapSvgWrap svg');
+  if (!svg) { alert('请先生成思维导图'); return; }
+  const xml = new XMLSerializer().serializeToString(svg);
+  if (fmt === 'svg') {
+    const url = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }));
+    triggerDownload(url, 'LiveWiki_思维导图.svg');
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }));
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2;
+    const w = svg.viewBox.baseVal.width || svg.width.baseVal.value;
+    const h = svg.viewBox.baseVal.height || svg.height.baseVal.value;
+    const canvas = document.createElement('canvas');
+    canvas.width = w * scale; canvas.height = h * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(b => {
+      const png = URL.createObjectURL(b);
+      triggerDownload(png, 'LiveWiki_思维导图.png');
+      setTimeout(() => URL.revokeObjectURL(png), 2000);
+    }, 'image/png');
+  };
+  img.onerror = () => alert('PNG 生成失败，请改用 SVG 下载');
+  img.src = url;
+}
+
+function triggerDownload(href, name) {
+  const a = document.createElement('a');
+  a.href = href; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 2000);
 }
 
 // ─── 辅助函数 ───
