@@ -749,9 +749,11 @@
     </div>
     <div class="toolbar">
       <button class="btn btn-secondary" onclick="loadSample()">📄 加载示例</button>
+      <button class="btn btn-secondary" onclick="document.getElementById('mdFileInput').click()">📎 上传 Markdown</button>
       <button class="btn btn-secondary" id="importTranscriptBtn" onclick="importTranscript()">📥 导入并生成</button>
       <button class="btn btn-secondary" onclick="clearInput()">🗑️ 清空</button>
       <button class="btn btn-primary" id="processBtn" onclick="processText()">⚡ 结构化处理</button>
+      <input type="file" id="mdFileInput" accept=".md,.markdown,.txt,text/markdown,text/plain" style="display:none">
     </div>
   </div>
 
@@ -894,7 +896,29 @@ const DRAFT_KEY = 'livewiki_draft';
     clearTimeout(t);
     t = setTimeout(() => { try { localStorage.setItem(DRAFT_KEY, ta.value); } catch {} }, 600);
   });
+
+  // 上传 Markdown / 文本文件：读取内容填入输入框并自动处理
+  const mdInput = document.getElementById('mdFileInput');
+  if (mdInput) mdInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) handleMdFile(file);
+    e.target.value = ''; // 允许重复选择同一文件
+  });
 })();
+
+// 读取本地 Markdown / 文本文件并填入输入框，随后自动结构化
+function handleMdFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const text = String(reader.result || '');
+    const ta = document.getElementById('inputText');
+    ta.value = text;
+    try { localStorage.setItem(DRAFT_KEY, text); } catch {}
+    processText();
+  };
+  reader.onerror = () => alert('读取文件失败：' + file.name);
+  reader.readAsText(file);
+}
 
 // ─── 视频导入：文件转写 ───
 async function transcribeFile() {
@@ -1462,19 +1486,49 @@ function renderMindmap(data) {
 }
 
 function buildMindmapSvg(root) {
-  const NODE_H = 46, H_GAP = 64, V_GAP = 14, PAD_X = 14;
+  const NODE_H_MIN = 44, H_GAP = 90, V_GAP = 18, PAD_X = 14, PAD_TOP = 11, LINE_H = 17, MAX_W = 340;
   const FONT = "system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif";
   const palette = ['#6366f1','#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6'];
   const textW = (s) => { let w = 0; for (const ch of (s||'')) w += /[\x00-\xff]/.test(ch) ? 8 : 15; return w; };
-  const nodeW = (n) => Math.max(90, Math.min(280, textW(n.name || '') + PAD_X * 2));
+  const WRAP_W = MAX_W - PAD_X * 2;
+  // 按宽度折行（CJK 按字、英文尽量按词），避免内容被截断
+  function wrapText(s, maxW) {
+    const out = [];
+    let line = '';
+    for (const ch of String(s || '')) {
+      if (textW(line + ch) <= maxW) { line += ch; }
+      else { if (line) out.push(line.replace(/\s+$/, '')); line = (ch === ' ' || ch === '　') ? '' : ch; }
+    }
+    if (line) out.push(line.replace(/\s+$/, ''));
+    return out.length ? out : [''];
+  }
+  // 折行后限制行数，超长才加省略号（名称≤2行，摘要≤3行）
+  function wrapCapped(s, cap) {
+    const all = wrapText(s, WRAP_W);
+    if (all.length <= cap) return all;
+    const cut = all.slice(0, cap);
+    cut[cap - 1] = cut[cap - 1] + '…';
+    return cut;
+  }
 
+  let _id = 0;
   function measure(n) {
-    n.w = nodeW(n);
+    n._id = _id++;
+    n._nameLines = wrapCapped(n.name || '', 2);
+    n._sumLines = n.summary ? wrapCapped(n.summary, 3) : [];
+    const longest = Math.max(
+      n._nameLines.reduce((m, l) => Math.max(m, textW(l)), 0),
+      n._sumLines.reduce((m, l) => Math.max(m, textW(l)), 0)
+    );
+    n.w = Math.max(90, Math.min(MAX_W, longest + PAD_X * 2));
+    const lines = n._nameLines.length + n._sumLines.length;
+    n.h = Math.max(NODE_H_MIN, PAD_TOP + lines * LINE_H);
     const kids = n.children || [];
-    if (!kids.length) { n.h = NODE_H; return n.h; }
-    let total = 0;
-    kids.forEach((c, i) => { total += measure(c); if (i) total += V_GAP; });
-    n.h = Math.max(NODE_H, total);
+    if (kids.length) {
+      let total = 0;
+      kids.forEach((c, i) => { total += measure(c); if (i) total += V_GAP; });
+      n.h = Math.max(n.h, total);
+    }
     return n.h;
   }
   measure(root);
@@ -1494,19 +1548,24 @@ function buildMindmapSvg(root) {
 
   const W = maxX + 40, H = maxY + 40;
   const colorOf = (d) => d === 0 ? '#6366f1' : palette[(d - 1) % palette.length];
-  let nodes = '', edges = '';
+  let defs = '', nodes = '', edges = '';
   (function walk(n, depth) {
     const col = colorOf(depth);
-    const y = n.y - NODE_H / 2;
+    const yTop0 = n.y - n.h / 2;
     const isRoot = depth === 0;
-    nodes += '<g>';
-    nodes += '<rect x="' + n.x + '" y="' + y + '" width="' + n.w + '" height="' + NODE_H + '" rx="10" ry="10" fill="' + (isRoot ? col : '#ffffff') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 2.5 : 1.5) + '"' + (isRoot ? '' : ' fill-opacity="0.05"') + '/>';
-    const label = (n.name || '').length > 22 ? (n.name || '').slice(0, 21) + '…' : (n.name || '');
-    nodes += '<text x="' + (n.x + PAD_X) + '" y="' + (n.y + 5) + '" font-family="' + FONT + '" font-size="' + (isRoot ? 15 : 13) + '" font-weight="' + (isRoot ? 800 : 600) + '" fill="' + (isRoot ? '#ffffff' : '#1f2937') + '">' + escapeXml(label) + '</text>';
-    if (n.summary && depth > 0) {
-      const sum = n.summary.length > 26 ? n.summary.slice(0, 25) + '…' : n.summary;
-      nodes += '<text x="' + (n.x + PAD_X) + '" y="' + (n.y + 23) + '" font-family="' + FONT + '" font-size="11" fill="#64748b">' + escapeXml(sum) + '</text>';
-    }
+    const rid = 'mmc' + n._id;
+    defs += '<clipPath id="' + rid + '"><rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10"/></clipPath>';
+    nodes += '<g clip-path="url(#' + rid + ')">';
+    nodes += '<rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10" fill="' + (isRoot ? col : '#ffffff') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 2.5 : 1.5) + '"' + (isRoot ? '' : ' fill-opacity="0.05"') + '/>';
+    let ty = yTop0 + PAD_TOP + 12;
+    n._nameLines.forEach(ln => {
+      nodes += '<text x="' + (n.x + PAD_X) + '" y="' + ty + '" font-family="' + FONT + '" font-size="' + (isRoot ? 15 : 13) + '" font-weight="' + (isRoot ? 800 : 600) + '" fill="' + (isRoot ? '#ffffff' : '#1f2937') + '">' + escapeXml(ln) + '</text>';
+      ty += LINE_H;
+    });
+    n._sumLines.forEach(ln => {
+      nodes += '<text x="' + (n.x + PAD_X) + '" y="' + ty + '" font-family="' + FONT + '" font-size="11" fill="#64748b">' + escapeXml(ln) + '</text>';
+      ty += LINE_H;
+    });
     nodes += '</g>';
     (n.children || []).forEach(c => {
       const x1 = n.x + n.w, y1 = n.y, x2 = c.x, y2 = c.y, mx = (x1 + x2) / 2;
@@ -1516,6 +1575,7 @@ function buildMindmapSvg(root) {
   })(root, 0);
 
   return '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" font-family="' + FONT + '">' +
+    '<defs>' + defs + '</defs>' +
     '<rect width="100%" height="100%" fill="#ffffff"/>' + edges + nodes + '</svg>';
 }
 
