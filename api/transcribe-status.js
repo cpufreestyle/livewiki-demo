@@ -1,7 +1,7 @@
 // Vercel Serverless Function: /api/transcribe/status
 // 检查转写环境依赖（Vercel 环境下大部分依赖不可用）
 
-module.exports = (req, res) => {
+export default (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
