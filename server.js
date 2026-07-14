@@ -50,10 +50,12 @@ const PORT = 3210;
 import { handleTranscribe, handleResolveVideo } from './scripts/server_handlers.mjs';
 
 import { processTranscript, extractKeywords, SAMPLE_TRANSCRIPT } from './lib/pipeline.mjs';
+import { sseHeaders, sseSend } from './lib/sse.mjs';
+import { parseMultipart } from './lib/multipart.mjs';
 
 // ─── HTTP 服务器 ─────────────────────────────────────────────────────
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   // CORS
@@ -82,19 +84,11 @@ const server = http.createServer((req, res) => {
       }
       // SSE 流式分支：逐节推送，前端秒见骨架、LLM 归纳完成后无缝替换
       if (url.searchParams.get('stream') === '1') {
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream; charset=utf-8',
-          'Cache-Control': 'no-cache, no-transform',
-          'Connection': 'keep-alive',
-          'X-Accel-Buffering': 'no',
-        });
-        const send = (ev) => {
-          try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch {}
-        };
+        sseHeaders(res);
         try {
-          await processTranscript(text, { onEvent: send });
+          await processTranscript(text, { onEvent: (ev) => sseSend(res, ev) });
         } catch (e) {
-          send('error', { message: e.message });
+          sseSend(res, { type: 'error', payload: { message: e.message } });
         } finally {
           res.end();
         }
@@ -243,68 +237,26 @@ const server = http.createServer((req, res) => {
 
   // API: 从上传文件转写（支持视频/音频）
   if (url.pathname === '/api/transcribe-file' && req.method === 'POST') {
-    // 解析 multipart/form-data
-    const boundary = req.headers['content-type']?.split('boundary=')[1];
-    if (!boundary) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: '缺少 multipart boundary' }));
-      return;
-    }
-
-    const chunks = [];
-    req.on('data', chunk => chunks.push(chunk));
-    req.on('end', () => {
-      const buffer = Buffer.concat(chunks);
-      const boundaryBuf = Buffer.from('--' + boundary);
-      
-      // 简单解析 multipart
-      let fileData = null;
-      let fileName = 'upload';
-      let skipDiarization = false;
-      let whisperModel = 'small';
-
-      const parts = [];
-      let start = 0;
-      while (true) {
-        const idx = buffer.indexOf(boundaryBuf, start);
-        if (idx === -1) break;
-        if (start > 0) parts.push(buffer.slice(start, idx - 2)); // -2 for \r\n before boundary
-        start = idx + boundaryBuf.length + 2; // +2 for \r\n after boundary
-      }
-      
-      for (const part of parts) {
-        const partStr = part.toString('utf8');
-        const headerEnd = part.indexOf('\r\n\r\n');
-        if (headerEnd === -1) continue;
-        const headers = partStr.substring(0, headerEnd);
-        const body = part.slice(headerEnd + 4, part.length - 2); // -2 for trailing \r\n
-        
-        if (headers.includes('name="file"')) {
-          fileData = body;
-          const fnameMatch = headers.match(/filename="([^"]+)"/);
-          if (fnameMatch) fileName = fnameMatch[1];
-        } else if (headers.includes('name="skipDiarization"')) {
-          skipDiarization = body.toString('utf8') === 'true';
-        } else if (headers.includes('name="whisperModel"')) {
-          whisperModel = body.toString('utf8') || 'small';
-        }
-      }
-      
-      if (!fileData) {
+    try {
+      const { fields, file } = await parseMultipart(req);
+      if (!file) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: '未找到上传文件' }));
         return;
       }
-      
+      const fileName = file.filename;
+      const skipDiarization = fields.skipDiarization === 'true';
+      const whisperModel = fields.whisperModel || 'small';
+
       // 保存到临时文件
       const tmpDir = path.join(os.tmpdir(), `livewiki_upload_${Date.now()}`);
       fs.mkdirSync(tmpDir, { recursive: true });
       const ext = path.extname(fileName) || '.bin';
       const filePath = path.join(tmpDir, `input${ext}`);
-      fs.writeFileSync(filePath, fileData);
-      
-      console.log(`[transcribe-file] 收到文件: ${fileName} (${(fileData.length/1024/1024).toFixed(1)} MB), 保存到 ${filePath}`);
-      
+      fs.writeFileSync(filePath, file.data);
+
+      console.log(`[transcribe-file] 收到文件: ${fileName} (${(file.data.length/1024/1024).toFixed(1)} MB), 保存到 ${filePath}`);
+
       // 调用 Python 脚本（用 --file 模式）
       const scriptPath = path.join(process.cwd(), 'scripts', 'transcribe.py');
       const hfToken = process.env.HF_TOKEN || '';
@@ -316,9 +268,9 @@ const server = http.createServer((req, res) => {
       }
       if (hfToken) args.push('--hf-token', hfToken);
       if (skipDiarization) args.push('--skip-diarization');
-      
+
       console.log(`[transcribe-file] 启动 Python 脚本: python3 ${args.join(' ')}`);
-      
+
       const child = execFile('python3', args, {
         timeout: 900000,
         maxBuffer: 10 * 1024 * 1024,
@@ -326,7 +278,7 @@ const server = http.createServer((req, res) => {
       }, (err, stdout, stderr) => {
         // 清理上传文件
         try { fs.unlinkSync(filePath); } catch {}
-        
+
         if (err && err.killed) {
           res.writeHead(504, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: '转写超时（超过 15 分钟）' }));
@@ -336,14 +288,14 @@ const server = http.createServer((req, res) => {
           console.error('[transcribe-file] Python 失败:', err.message);
           console.error('[transcribe-file] stderr:', stderr?.substring(0, 500));
           res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ 
+          res.end(JSON.stringify({
             error: '转写失败: ' + (err.message || '未知错误'),
             hint: '请确保已安装 ffmpeg, faster-whisper',
             stderr: stderr?.substring(0, 1000)
           }));
           return;
         }
-        
+
         try {
           const lastLine = stdout.trim().split('\n').pop();
           const result = JSON.parse(lastLine);
@@ -358,14 +310,17 @@ const server = http.createServer((req, res) => {
         } catch(parseErr) {
           console.error('[transcribe-file] JSON 解析失败:', stdout.substring(0, 500));
           res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ 
+          res.end(JSON.stringify({
             error: '转写结果解析失败',
             stdout: stdout.substring(0, 1000),
             stderr: stderr?.substring(0, 1000)
           }));
         }
       });
-    });
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return;
   }
 

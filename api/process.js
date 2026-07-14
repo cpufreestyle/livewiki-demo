@@ -2,6 +2,7 @@
 // LiveWiki AI 处理管线（ESM，复用 lib/pipeline.mjs 以与本地 server.js 保持一致）
 
 import { processTranscript } from '../lib/pipeline.mjs';
+import { sseHeaders, sseSend } from '../lib/sse.mjs';
 
 // 兼容两种运行环境：
 // - Vercel Node 运行时已把 JSON body 解析到 req.body
@@ -43,19 +44,11 @@ export default async function handler(req, res) {
   }
 
   if (stream) {
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
-    const send = (ev) => {
-      try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch {}
-    };
+    sseHeaders(res);
     try {
-      await processTranscript(text, { onEvent: send });
+      await processTranscript(text, { onEvent: (ev) => sseSend(res, ev) });
     } catch (e) {
-      send('error', { message: e.message });
+      sseSend(res, { type: 'error', payload: { message: e.message } });
     } finally {
       res.end();
     }
