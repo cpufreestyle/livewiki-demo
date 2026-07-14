@@ -67,18 +67,41 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // API: 处理逐字稿
+  // API: 处理逐字稿（?stream=1 时走 SSE 流式输出，否则返回完整 JSON）
   if (url.pathname === '/api/process' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => body += chunk);
     req.on('end', async () => {
-      try {
-        const { text } = JSON.parse(body);
-        if (!text || text.trim().length < 10) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: '文本太短，至少需要 10 个字符' }));
-          return;
+      let parsed;
+      try { parsed = JSON.parse(body); } catch { parsed = {}; }
+      const { text } = parsed;
+      if (!text || text.trim().length < 10) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: '文本太短，至少需要 10 个字符' }));
+        return;
+      }
+      // SSE 流式分支：逐节推送，前端秒见骨架、LLM 归纳完成后无缝替换
+      if (url.searchParams.get('stream') === '1') {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        const send = (ev) => {
+          try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch {}
+        };
+        try {
+          await processTranscript(text, { onEvent: send });
+        } catch (e) {
+          send('error', { message: e.message });
+        } finally {
+          res.end();
         }
+        return;
+      }
+      // 非流式兜底（便于脚本/测试直接拿完整 JSON）
+      try {
         const result = await processTranscript(text);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));

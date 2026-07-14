@@ -16,6 +16,9 @@ async function readJsonBody(req) {
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return {}; }
 }
 
+// 关掉 Vercel 默认 bodyParser，以便自行读取流 & 流式输出
+export const config = { api: { bodyParser: false } };
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -30,11 +33,35 @@ export default async function handler(req, res) {
     return;
   }
 
+  const query = new URL(req.url, 'http://localhost').searchParams;
+  const stream = query.get('stream') === '1';
+
   const { text } = await readJsonBody(req);
   if (!text || text.trim().length < 10) {
     res.status(400).json({ error: '文本太短，至少需要 10 个字符' });
     return;
   }
+
+  if (stream) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    const send = (ev) => {
+      try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch {}
+    };
+    try {
+      await processTranscript(text, { onEvent: send });
+    } catch (e) {
+      send('error', { message: e.message });
+    } finally {
+      res.end();
+    }
+    return;
+  }
+
   try {
     const result = await processTranscript(text);
     res.status(200).json(result);

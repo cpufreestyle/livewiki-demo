@@ -659,7 +659,7 @@
 <div class="header">
   <div class="logo">📚 LiveWiki</div>
   <div class="tagline">AI 直播课程知识沉淀引擎</div>
-  <div class="badge">Demo v2.2 · 自动找真实链接</div>
+  <div class="badge">Demo v2.3 · 流式·真实用量·缓存</div>
 </div>
 
 <div class="container">
@@ -806,6 +806,7 @@
     <div class="toolbar" id="exportBar" style="display:none;">
       <button class="btn btn-secondary" onclick="copyMarkdown()">📋 复制 Markdown</button>
       <button class="btn btn-secondary" onclick="downloadMarkdown()">⬇️ 下载 .md 文件</button>
+      <button class="btn btn-secondary" onclick="downloadHtml()">🌐 下载 HTML</button>
     </div>
   </div>
 </div>
@@ -878,6 +879,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 });
+
+// ─── 草稿自动保存（localStorage，防误关丢失）───
+const DRAFT_KEY = 'livewiki_draft';
+(function initDraft() {
+  const ta = document.getElementById('inputText');
+  if (!ta) return;
+  try {
+    const saved = localStorage.getItem(DRAFT_KEY);
+    if (saved && !ta.value) ta.value = saved;
+  } catch {}
+  let t;
+  ta.addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(() => { try { localStorage.setItem(DRAFT_KEY, ta.value); } catch {} }, 600);
+  });
+})();
 
 // ─── 视频导入：文件转写 ───
 async function transcribeFile() {
@@ -1186,11 +1203,12 @@ async function importTranscript() {
 // ─── 清空 ───
 function clearInput() {
   document.getElementById('inputText').value = '';
+  try { localStorage.removeItem('livewiki_draft'); } catch {}
   currentResult = null;
   resetOutput();
 }
 
-// ─── 处理文本 ───
+// ─── 处理文本（SSE 流式，逐节呈现）───
 async function processText() {
   const text = document.getElementById('inputText').value.trim();
   if (text.length < 10) {
@@ -1202,11 +1220,25 @@ async function processText() {
   btn.disabled = true;
   btn.textContent = '⏳ 处理中...';
 
-  // 显示 loading
+  // 重置输出 + 流式状态条
+  resetOutput();
+  let streamSections = [];
+  let streamStatusText = '正在连接…';
+  const setStatus = (msg) => {
+    streamStatusText = msg;
+    const el = document.getElementById('streamStatus');
+    if (el) el.textContent = msg;
+  };
+  const renderStream = () => {
+    document.getElementById('tab-doc').innerHTML =
+      `<div style="font-size:13px;color:var(--text-dim);padding:10px 0 4px;">${escapeHtml(streamStatusText)}</div>` +
+      buildDocHtml(streamSections, []);
+  };
+
   document.getElementById('tab-doc').innerHTML = `
     <div class="loading">
       <div class="spinner"></div>
-      <div>AI 正在处理逐字稿...</div>
+      <div id="streamStatus">AI 正在处理逐字稿...（流式）</div>
       <div style="font-size:12px; color:var(--text-dim);">
         预处理 → 语义切分 → 内容结构化 → 知识关联 → 生成文档
       </div>
@@ -1216,15 +1248,60 @@ async function processText() {
   document.getElementById('tab-stats').innerHTML = '<div class="loading"><div class="spinner"></div><div>统计中...</div></div>';
 
   try {
-    const resp = await fetch('/api/process', {
+    const resp = await fetch('/api/process?stream=1', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text })
     });
-    const result = await safeJson(resp);
-    currentResult = result;
-    currentRawText = text;
-    renderResult(result);
+    if (!resp.ok) {
+      let msg = 'HTTP ' + resp.status;
+      try { const d = await safeJson(resp); if (d && d.error) msg = d.error; } catch {}
+      throw new Error(msg);
+    }
+    // 浏览器不支持流式时退化到一次性 JSON
+    if (!resp.body || !resp.body.getReader) {
+      const result = await safeJson(resp);
+      currentResult = result;
+      currentRawText = text;
+      renderResult(result);
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalResult = null;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const rawEvent = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const dataLine = rawEvent.split('\n').find(l => l.startsWith('data:'));
+        if (!dataLine) continue;
+        let ev;
+        try { ev = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
+        if (ev.type === 'status') {
+          streamStatusText = ev.payload.message;
+          const el = document.getElementById('streamStatus');
+          if (el) el.textContent = ev.payload.message;
+          else if (streamSections.some(Boolean)) renderStream(); // 已渲染章节后，刷新顶部状态条
+        } else if (ev.type === 'section') {
+          streamSections[ev.payload.index] = ev.payload.section;
+          renderStream();
+        } else if (ev.type === 'done') {
+          finalResult = ev.payload.result;
+          currentResult = finalResult;
+          currentRawText = text;
+          renderResult(finalResult);
+        } else if (ev.type === 'error') {
+          throw new Error(ev.payload.message || '流式处理出错');
+        }
+      }
+    }
+    if (!finalResult) throw new Error('流结束但未收到最终结果');
   } catch(e) {
     document.getElementById('tab-doc').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>处理失败: ${e.message}</div></div>`;
   } finally {
@@ -1233,11 +1310,8 @@ async function processText() {
   }
 }
 
-// ─── 渲染结果 ───
-function renderResult(result) {
-  const { stats, structured, relations, output } = result;
-
-  // 文档视图
+// ─── 文档视图（结构化章节）───
+function buildDocHtml(structured, relations) {
   let docHtml = `
     <div class="pipeline">
       <div class="pipeline-step done">✓ 预处理</div>
@@ -1282,7 +1356,14 @@ function renderResult(result) {
     docHtml += `</div>`;
   }
 
-  document.getElementById('tab-doc').innerHTML = docHtml;
+  return docHtml;
+}
+
+// ─── 渲染结果 ───
+function renderResult(result) {
+  const { stats, structured, relations, output } = result;
+
+  document.getElementById('tab-doc').innerHTML = buildDocHtml(structured, relations);
 
   // Markdown 视图
   document.getElementById('tab-markdown').innerHTML = `<div class="markdown-view">${escapeHtml(output.markdown)}</div>`;
@@ -1297,11 +1378,22 @@ function renderResult(result) {
       <div class="stat-card"><div class="stat-label">知识关联</div><div class="stat-value">${stats.relationCount}</div></div>
       <div class="stat-card"><div class="stat-label">处理耗时</div><div class="stat-value">${stats.processingTime}ms</div></div>
     </div>
+    <div style="margin:8px 0 14px; font-size:13px; display:flex; gap:8px; flex-wrap:wrap;">
+      ${stats.llmUsed
+        ? '<span style="color:#059669; background:#d1fae5; padding:4px 10px; border-radius:999px;">🟢 LLM 生成式归纳已启用</span>'
+        : '<span style="color:#b45309; background:#fef3c7; padding:4px 10px; border-radius:999px;">🟡 已降级为本地规则引擎（未启用 / 未成功调用 LLM）</span>'}
+      ${stats.cached ? '<span style="color:#2563eb; background:#dbeafe; padding:4px 10px; border-radius:999px;">⚡ 命中缓存·秒回</span>' : ''}
+    </div>
     <div style="color:var(--text-dim); font-size:13px; padding:16px; background:var(--surface2); border-radius:8px;">
-      <strong>💡 Token 成本估算（模拟）</strong><br><br>
-      输入: ~${Math.ceil(stats.originalLength / 1.5)} tokens<br>
-      输出: ~${Math.ceil(stats.cleanedLength / 1.5)} tokens<br>
-      预估成本: ¥${(stats.originalLength / 1.5 * 0.00001 + stats.cleanedLength / 1.5 * 0.00003).toFixed(4)}<br>
+      ${stats.tokenUsage
+        ? `<strong>💡 Token 真实用量（${stats.tokenUsage.provider} · ${stats.tokenUsage.model}）</strong><br><br>
+           输入: ${stats.tokenUsage.promptTokens} tokens<br>
+           输出: ${stats.tokenUsage.completionTokens} tokens<br>
+           合计: ${stats.tokenUsage.totalTokens} tokens`
+        : `<strong>💡 Token 成本估算（未接入 LLM，按字数粗估）</strong><br><br>
+           输入: ~${Math.ceil(stats.originalLength / 1.5)} tokens<br>
+           输出: ~${Math.ceil(stats.cleanedLength / 1.5)} tokens<br>
+           预估成本: ¥${(stats.originalLength / 1.5 * 0.00001 + stats.cleanedLength / 1.5 * 0.00003).toFixed(4)}`}
       <br>
       <strong>处理管线</strong><br>
       Stage 1 预处理: 去除语气词、重复段落、口语化表达<br>
@@ -1505,6 +1597,47 @@ function downloadMarkdown() {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'LiveWiki_结构化文档.md';
+  a.click();
+}
+
+// 生成一份独立可打开的 HTML 文档（自带样式，便于分享/归档）
+function downloadHtml() {
+  if (!currentResult) return;
+  const { structured, relations, stats } = currentResult;
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const body = structured.map((s, i) => {
+    const kp = (s.keyPoints || []).map(k => `<li>${esc(k)}</li>`).join('');
+    const content = (s.content || []).map(c => `<p>${esc(c)}</p>`).join('');
+    return `<section class="sec">
+      <h2>${i + 1}. ${esc(s.title)}</h2>
+      <p class="summary">摘要：${esc(s.summary)}</p>
+      ${kp ? `<ul>${kp}</ul>` : ''}
+      <div class="content">${content}</div>
+    </section>`;
+  }).join('\n');
+  const rel = (relations || []).map(r =>
+    `<li>「${esc(structured[r.from].title)}」 ↔ 「${esc(structured[r.to].title)}」（共同概念：${esc((r.sharedTerms || []).join(', '))}）</li>`
+  ).join('');
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>LiveWiki 结构化学习文档</title>
+<style>
+  body{font-family:system-ui,'PingFang SC','Microsoft YaHei',sans-serif;max-width:820px;margin:32px auto;padding:0 20px;color:#1f2937;line-height:1.7}
+  h1{font-size:24px} h2{font-size:19px;margin-top:28px;border-left:4px solid #6366f1;padding-left:10px}
+  .summary{color:#475569;background:#f8fafc;padding:8px 12px;border-radius:6px}
+  .content p{white-space:pre-wrap}
+  .relations{margin-top:28px;background:#fffbeb;padding:14px 18px;border-radius:8px}
+  .meta{color:#64748b;font-size:13px}
+</style></head><body>
+  <h1>LiveWiki 结构化学习文档</h1>
+  <p class="meta">由 LiveWiki AI 引擎自动生成 · 原文 ${stats.originalLength} 字 → 结构化 ${structured.reduce((a, s) => a + s.wordCount, 0)} 字</p>
+  ${body}
+  ${rel ? `<div class="relations"><h2>🔗 知识关联</h2><ul>${rel}</ul></div>` : ''}
+  <hr><p class="meta">LiveWiki — 从"听过"到"学会"，从"碎片"到"体系"。</p>
+</body></html>`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+  a.download = 'LiveWiki_结构化文档.html';
   a.click();
 }
 
