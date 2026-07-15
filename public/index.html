@@ -1579,6 +1579,20 @@ function toggleMindmapNode(id) {
   drawMindmap();
 }
 
+// 点击脑图节点 → 切换右侧文档标签页并滚动到对应章节（短暂高亮）
+function scrollToSectionFromMindmap(id) {
+  const node = mindmapData ? findMmNode(mindmapData, id) : null;
+  if (!node || node._sectionIndex == null) return;
+  switchTab('doc');
+  const el = document.getElementById('section-' + node._sectionIndex);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  el.style.outline = '2px solid var(--accent)';
+  el.style.outlineOffset = '4px';
+  el.style.borderRadius = '8px';
+  setTimeout(() => { el.style.outline = 'transparent'; }, 1500);
+}
+
 // 平移/缩放/折叠交互（监听挂在持久化的 wrap 上，每次重渲染会自动绑定到新 wrap）
 function attachMindmapInteractions(wrap) {
   let dragging = false, lastX = 0, lastY = 0, moved = false;
@@ -1610,9 +1624,15 @@ function attachMindmapInteractions(wrap) {
   wrap.addEventListener('pointerup', endDrag);
   wrap.addEventListener('pointerleave', endDrag);
   wrap.addEventListener('click', (e) => {
-    if (moved) return; // 拖拽结束不触发折叠
+    if (moved) return; // 拖拽结束不触发
     const g = e.target.closest('[data-nid]');
-    if (g) toggleMindmapNode(Number(g.getAttribute('data-nid')));
+    if (!g) return;
+    const id = Number(g.getAttribute('data-nid'));
+    if (e.target.closest('[data-toggle]')) {
+      toggleMindmapNode(id);           // 点 ▸/▾ → 折叠/展开子树
+    } else {
+      scrollToSectionFromMindmap(id);  // 点节点主体 → 联动右侧文档
+    }
   });
 }
 
@@ -1683,14 +1703,16 @@ function buildMindmapSvg(root) {
   let defs = '', nodes = '', edges = '';
   defs += '<style>.node:hover rect{stroke-width:2.5}</style>';
   // 按"主题/分支"着色：根节点统一色，其每个一级子分支取一种颜色，后代继承所属分支颜色
-  (function walk(n, depth, branch) {
+  (function walk(n, depth, branch, sectionIndex) {
     const isRoot = depth === 0;
+    if (!isRoot) n._sectionIndex = sectionIndex; // 标记所属文档章节，用于点击联动
     const col = isRoot ? ROOT_COLOR : palette[(branch + 1) % palette.length];
     const yTop0 = n.y - n.h / 2;
     const rid = 'mmc' + n._id;
     const hasKids = (n.children && n.children.length) > 0;
+    const collapsible = hasKids && !isRoot; // 根节点整体不折叠，避免误收起整图
     defs += '<clipPath id="' + rid + '"><rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10"/></clipPath>';
-    nodes += '<g class="node" data-nid="' + n._id + '" clip-path="url(#' + rid + ')" style="cursor:' + (hasKids ? 'pointer' : 'default') + '">';
+    nodes += '<g class="node" data-nid="' + n._id + '" clip-path="url(#' + rid + ')" style="cursor:' + (collapsible ? 'pointer' : 'default') + '">';
     nodes += '<rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10" fill="' + (isRoot ? col : '#ffffff') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 2.5 : 1.5) + '"' + (isRoot ? '' : ' fill-opacity="0.05"') + '/>';
     let ty = yTop0 + PAD_TOP + 12;
     n._nameLines.forEach(ln => {
@@ -1701,20 +1723,21 @@ function buildMindmapSvg(root) {
       nodes += '<text x="' + (n.x + PAD_X) + '" y="' + ty + '" font-family="' + FONT + '" font-size="11" fill="#64748b">' + escapeXml(ln) + '</text>';
       ty += LINE_H;
     });
-    // 折叠/展开指示符
-    if (hasKids) {
-      nodes += '<text x="' + (n.x + 6) + '" y="' + (yTop0 + 15) + '" font-family="' + FONT + '" font-size="11" font-weight="700" fill="' + col + '">' + (n._collapsed ? '▸' : '▾') + '</text>';
+    // 折叠/展开指示符（仅非根节点，点击 ▸/▾ 折叠；点节点主体则联动文档）
+    if (collapsible) {
+      nodes += '<text data-toggle="1" x="' + (n.x + 6) + '" y="' + (yTop0 + 15) + '" font-family="' + FONT + '" font-size="11" font-weight="700" fill="' + col + '" style="cursor:pointer;">' + (n._collapsed ? '▸' : '▾') + '</text>';
     }
     nodes += '</g>';
     (n.children || []).forEach((c, i) => {
       if (n._collapsed) return;
       const childBranch = isRoot ? i : branch;
+      const childSection = isRoot ? i : sectionIndex;
       const ccol = palette[(childBranch + 1) % palette.length];
       const x1 = n.x + n.w, y1 = n.y, x2 = c.x, y2 = c.y, mx = (x1 + x2) / 2;
       edges += '<path d="M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2 + '" fill="none" stroke="' + ccol + '" stroke-width="1.5" stroke-opacity="0.5"/>';
-      walk(c, depth + 1, childBranch);
+      walk(c, depth + 1, childBranch, childSection);
     });
-  })(root, 0, 0);
+  })(root, 0, 0, undefined);
 
   return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" font-family="' + FONT + '" style="width:100%;height:100%;background:#ffffff;display:block;">' +
     '<defs>' + defs + '</defs>' + edges + nodes + '</svg>';
