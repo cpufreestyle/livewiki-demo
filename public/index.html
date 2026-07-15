@@ -1461,6 +1461,8 @@ function renderResult(result) {
 
 // ─── 摘要 + 思维导图 ───
 let mindmapData = null;
+let mmDims = { W: 0, H: 0 };   // 当前脑图内容尺寸（用于缩放/导出）
+let mmView = null;             // 视口状态 { vx, vy, vw, vh, ready }
 
 async function loadSummaryAndMindmap(structured, rawText) {
   document.getElementById('tab-summary').innerHTML = '<div class="output-empty"><div class="big-icon" style="animation:spin 1.5s linear infinite;">⏳</div><div>正在生成精简摘要...</div></div>';
@@ -1501,19 +1503,124 @@ async function loadSummaryAndMindmap(structured, rawText) {
 }
 
 function renderMindmap(data) {
+  mindmapData = data;
   const container = document.getElementById('tab-mindmap');
   container.innerHTML =
-    '<div class="mindmap-container"><div class="mindmap-controls">' +
-    '<button class="btn btn-secondary btn-sm" onclick="downloadMindmap(\'svg\')">⬇️ 下载 SVG</button>' +
-    '<button class="btn btn-primary btn-sm" onclick="downloadMindmap(\'png\')">⬇️ 下载 PNG</button>' +
-    '</div><div id="mindmapSvgWrap" class="mindmap-svg-wrap"></div></div>';
-  document.getElementById('mindmapSvgWrap').innerHTML = buildMindmapSvg(data);
+    '<div class="mindmap-container"><div class="mindmap-controls" style="flex-wrap:wrap;">' +
+    '<button class="btn btn-secondary btn-sm" onclick="mmZoom(1.25)">🔍 放大</button>' +
+    '<button class="btn btn-secondary btn-sm" onclick="mmZoom(0.8)">🔍 缩小</button>' +
+    '<button class="btn btn-secondary btn-sm" onclick="mmFit()">⤢ 适配</button>' +
+    '<span class="mm-hint" style="font-size:12px;color:var(--text-dim);align-self:center;">滚轮缩放 · 拖拽平移 · 点击节点折叠/展开</span>' +
+    '<span style="flex:1;"></span>' +
+    '<button class="btn btn-primary btn-sm" onclick="downloadMindmap(\'svg\')">⬇️ SVG</button>' +
+    '<button class="btn btn-primary btn-sm" onclick="downloadMindmap(\'png\')">⬇️ PNG</button>' +
+    '</div><div id="mindmapSvgWrap" class="mindmap-svg-wrap" style="height:72vh;overflow:hidden;touch-action:none;"></div></div>';
+  mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: false };
+  drawMindmap();
+  attachMindmapInteractions(document.getElementById('mindmapSvgWrap'));
+}
+
+function drawMindmap() {
+  const wrap = document.getElementById('mindmapSvgWrap');
+  if (!wrap) return;
+  wrap.innerHTML = buildMindmapSvg(mindmapData);
+  if (!mmView.ready) {
+    mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: true };
+  }
+  applyView(wrap.querySelector('svg'));
+}
+
+function applyView(svg) {
+  if (!svg || !mmView || !mmView.ready) return;
+  svg.setAttribute('viewBox', mmView.vx + ' ' + mmView.vy + ' ' + mmView.vw + ' ' + mmView.vh);
+}
+
+function mmZoom(factor) {
+  const svg = document.querySelector('#mindmapSvgWrap svg');
+  if (svg) zoomView(svg, 0.5, 0.5, factor);
+}
+
+function mmFit() {
+  const svg = document.querySelector('#mindmapSvgWrap svg');
+  if (!svg) return;
+  mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: true };
+  applyView(svg);
+}
+
+// 以 (px,py)∈[0,1] 为锚点缩放视图（鼠标位置/中心）
+function zoomView(svg, px, py, factor) {
+  const cx = mmView.vx + px * mmView.vw;
+  const cy = mmView.vy + py * mmView.vh;
+  let nvw = mmView.vw * factor;
+  const minVw = mmDims.W * 0.12, maxVw = mmDims.W * 5;
+  nvw = Math.max(minVw, Math.min(maxVw, nvw));
+  const ratio = mmView.vh / mmView.vw;
+  const nvh = nvw * ratio;
+  mmView.vx = cx - px * nvw;
+  mmView.vy = cy - py * nvh;
+  mmView.vw = nvw; mmView.vh = nvh;
+  applyView(svg);
+}
+
+function findMmNode(n, id) {
+  if (n._id === id) return n;
+  for (const c of (n.children || [])) {
+    const f = findMmNode(c, id);
+    if (f) return f;
+  }
+  return null;
+}
+
+function toggleMindmapNode(id) {
+  const node = mindmapData ? findMmNode(mindmapData, id) : null;
+  if (!node || !(node.children && node.children.length)) return;
+  node._collapsed = !node._collapsed;
+  mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: false }; // 折叠后重新适配
+  drawMindmap();
+}
+
+// 平移/缩放/折叠交互（监听挂在持久化的 wrap 上，每次重渲染会自动绑定到新 wrap）
+function attachMindmapInteractions(wrap) {
+  let dragging = false, lastX = 0, lastY = 0, moved = false;
+  wrap.addEventListener('wheel', (e) => {
+    const svg = wrap.querySelector('svg');
+    if (!svg || !mmView || !mmView.ready) return;
+    e.preventDefault();
+    const rect = svg.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width;
+    const py = (e.clientY - rect.top) / rect.height;
+    zoomView(svg, px, py, e.deltaY < 0 ? 0.85 : 1 / 0.85);
+  }, { passive: false });
+  wrap.addEventListener('pointerdown', (e) => {
+    dragging = true; moved = false; lastX = e.clientX; lastY = e.clientY;
+  });
+  wrap.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const svg = wrap.querySelector('svg');
+    if (!svg || !mmView || !mmView.ready) return;
+    const rect = svg.getBoundingClientRect();
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    mmView.vx -= dx * (mmView.vw / rect.width);
+    mmView.vy -= dy * (mmView.vh / rect.height);
+    lastX = e.clientX; lastY = e.clientY;
+    applyView(svg);
+  });
+  const endDrag = () => { dragging = false; };
+  wrap.addEventListener('pointerup', endDrag);
+  wrap.addEventListener('pointerleave', endDrag);
+  wrap.addEventListener('click', (e) => {
+    if (moved) return; // 拖拽结束不触发折叠
+    const g = e.target.closest('[data-nid]');
+    if (g) toggleMindmapNode(Number(g.getAttribute('data-nid')));
+  });
 }
 
 function buildMindmapSvg(root) {
   const NODE_H_MIN = 44, H_GAP = 90, V_GAP = 18, PAD_X = 14, PAD_TOP = 11, LINE_H = 17, MAX_W = 340;
   const FONT = "system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif";
   const palette = ['#6366f1','#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6'];
+  const ROOT_COLOR = '#6366f1';
   const textW = (s) => { let w = 0; for (const ch of (s||'')) w += /[\x00-\xff]/.test(ch) ? 8 : 15; return w; };
   const WRAP_W = MAX_W - PAD_X * 2;
   // 按宽度折行（CJK 按字、英文尽量按词），避免内容被截断
@@ -1549,7 +1656,7 @@ function buildMindmapSvg(root) {
     const lines = n._nameLines.length + n._sumLines.length;
     n.h = Math.max(NODE_H_MIN, PAD_TOP + lines * LINE_H);
     const kids = n.children || [];
-    if (kids.length) {
+    if (kids.length && !n._collapsed) {
       let total = 0;
       kids.forEach((c, i) => { total += measure(c); if (i) total += V_GAP; });
       n.h = Math.max(n.h, total);
@@ -1563,7 +1670,7 @@ function buildMindmapSvg(root) {
     n.x = x; n.y = yTop + n.h / 2;
     maxX = Math.max(maxX, x + n.w); maxY = Math.max(maxY, yTop + n.h);
     const kids = n.children || [];
-    if (kids.length) {
+    if (kids.length && !n._collapsed) {
       const cx = x + n.w + H_GAP;
       let cur = yTop;
       kids.forEach(c => { place(c, cx, cur); cur += c.h + V_GAP; });
@@ -1572,15 +1679,18 @@ function buildMindmapSvg(root) {
   place(root, 20, 20);
 
   const W = maxX + 40, H = maxY + 40;
-  const colorOf = (d) => d === 0 ? '#6366f1' : palette[(d - 1) % palette.length];
+  mmDims = { W, H };
   let defs = '', nodes = '', edges = '';
-  (function walk(n, depth) {
-    const col = colorOf(depth);
-    const yTop0 = n.y - n.h / 2;
+  defs += '<style>.node:hover rect{stroke-width:2.5}</style>';
+  // 按"主题/分支"着色：根节点统一色，其每个一级子分支取一种颜色，后代继承所属分支颜色
+  (function walk(n, depth, branch) {
     const isRoot = depth === 0;
+    const col = isRoot ? ROOT_COLOR : palette[(branch + 1) % palette.length];
+    const yTop0 = n.y - n.h / 2;
     const rid = 'mmc' + n._id;
+    const hasKids = (n.children && n.children.length) > 0;
     defs += '<clipPath id="' + rid + '"><rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10"/></clipPath>';
-    nodes += '<g clip-path="url(#' + rid + ')">';
+    nodes += '<g class="node" data-nid="' + n._id + '" clip-path="url(#' + rid + ')" style="cursor:' + (hasKids ? 'pointer' : 'default') + '">';
     nodes += '<rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10" fill="' + (isRoot ? col : '#ffffff') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 2.5 : 1.5) + '"' + (isRoot ? '' : ' fill-opacity="0.05"') + '/>';
     let ty = yTop0 + PAD_TOP + 12;
     n._nameLines.forEach(ln => {
@@ -1591,17 +1701,23 @@ function buildMindmapSvg(root) {
       nodes += '<text x="' + (n.x + PAD_X) + '" y="' + ty + '" font-family="' + FONT + '" font-size="11" fill="#64748b">' + escapeXml(ln) + '</text>';
       ty += LINE_H;
     });
+    // 折叠/展开指示符
+    if (hasKids) {
+      nodes += '<text x="' + (n.x + 6) + '" y="' + (yTop0 + 15) + '" font-family="' + FONT + '" font-size="11" font-weight="700" fill="' + col + '">' + (n._collapsed ? '▸' : '▾') + '</text>';
+    }
     nodes += '</g>';
-    (n.children || []).forEach(c => {
+    (n.children || []).forEach((c, i) => {
+      if (n._collapsed) return;
+      const childBranch = isRoot ? i : branch;
+      const ccol = palette[(childBranch + 1) % palette.length];
       const x1 = n.x + n.w, y1 = n.y, x2 = c.x, y2 = c.y, mx = (x1 + x2) / 2;
-      edges += '<path d="M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2 + '" fill="none" stroke="' + col + '" stroke-width="1.5" stroke-opacity="0.5"/>';
+      edges += '<path d="M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2 + '" fill="none" stroke="' + ccol + '" stroke-width="1.5" stroke-opacity="0.5"/>';
+      walk(c, depth + 1, childBranch);
     });
-    (n.children || []).forEach(c => walk(c, depth + 1));
-  })(root, 0);
+  })(root, 0, 0);
 
-  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" font-family="' + FONT + '">' +
-    '<defs>' + defs + '</defs>' +
-    '<rect width="100%" height="100%" fill="#ffffff"/>' + edges + nodes + '</svg>';
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" font-family="' + FONT + '" style="width:100%;height:100%;background:#ffffff;display:block;">' +
+    '<defs>' + defs + '</defs>' + edges + nodes + '</svg>';
 }
 
 function escapeXml(s) {
@@ -1611,7 +1727,17 @@ function escapeXml(s) {
 function downloadMindmap(fmt) {
   const svg = document.querySelector('#mindmapSvgWrap svg');
   if (!svg) { alert('请先生成思维导图'); return; }
+  // 导出完整脑图（忽略当前缩放/平移视图），并补全宽高以保证 PNG 有确定像素尺寸
+  const origVB = svg.getAttribute('viewBox');
+  const origW = svg.getAttribute('width');
+  const origH = svg.getAttribute('height');
+  svg.setAttribute('viewBox', '0 0 ' + mmDims.W + ' ' + mmDims.H);
+  svg.setAttribute('width', mmDims.W);
+  svg.setAttribute('height', mmDims.H);
   const xml = new XMLSerializer().serializeToString(svg);
+  svg.setAttribute('viewBox', origVB);
+  if (origW) svg.setAttribute('width', origW); else svg.removeAttribute('width');
+  if (origH) svg.setAttribute('height', origH); else svg.removeAttribute('height');
   if (fmt === 'svg') {
     const url = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }));
     triggerDownload(url, 'LiveWiki_思维导图.svg');
@@ -1621,8 +1747,7 @@ function downloadMindmap(fmt) {
   const img = new Image();
   img.onload = () => {
     const scale = 2;
-    const w = svg.viewBox.baseVal.width || svg.width.baseVal.value;
-    const h = svg.viewBox.baseVal.height || svg.height.baseVal.value;
+    const w = mmDims.W, h = mmDims.H;
     const canvas = document.createElement('canvas');
     canvas.width = w * scale; canvas.height = h * scale;
     const ctx = canvas.getContext('2d');
