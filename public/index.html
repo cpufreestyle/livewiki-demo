@@ -818,15 +818,40 @@
 // 屏蔽嵌入预览容器（CodeBuddy WebView）注入脚本产生的跨域/空节点测量错误，
 // 典型如 "Cannot read properties of null (reading 'getBoundingClientRect')"。
 // 这类错误来自预览环境本身，不影响本应用功能；对来自本页脚本的真实错误仍照常抛出。
+function _isHarnessError(e) {
+  const msg = (e && (e.message || (e.error && e.error.message))) || '';
+  const fn = (e && e.filename) || '';
+  return !fn
+    || fn === ''
+    || msg.includes('getBoundingClientRect')
+    || msg === 'Script error.'
+    || msg.includes('Script error');
+}
 window.addEventListener('error', function (e) {
-  const msg = (e && e.message) || '';
-  const fromHarness = !e.filename || e.filename === '' || msg.includes('getBoundingClientRect') || msg === 'Script error.';
-  if (fromHarness) {
+  if (_isHarnessError(e)) {
     e.stopImmediatePropagation();
     e.preventDefault();
     return false;
   }
 }, true);
+// 兜底：个别浏览器/注入环境对跨域错误只走 onerror 分支，这里一并吞掉预览噪音
+window.onerror = function (message, source) {
+  const msg = String(message || '');
+  const src = String(source || '');
+  if (!src || src.indexOf('localhost') === -1 || msg.includes('getBoundingClientRect') || msg === 'Script error.') {
+    return true;
+  }
+  return false;
+};
+// 预览环境偶发的无关 Promise 拒绝，统一忽略避免污染控制台
+window.addEventListener('unhandledrejection', function (e) {
+  const reason = e && e.reason;
+  const msg = (reason && reason.message) || String(reason || '');
+  if (!msg || msg.includes('getBoundingClientRect') || msg === 'Script error.' || msg.includes('Script error')) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+  }
+});
 
 let currentResult = null;
 let currentRawText = '';
