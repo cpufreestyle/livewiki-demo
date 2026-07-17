@@ -1,0 +1,16 @@
+# 登录凭证（含敏感 cookie，仅本机，切勿提交）
+bili_credential.json
+
+# 登录二维码（临时文件）
+bilibili-qr-*.png
+
+# 待上传的媒体文件（非程序本身）
+*.mp4
+*.png
+!icon.png
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
