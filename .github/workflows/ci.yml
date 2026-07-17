@@ -24,12 +24,45 @@ jobs:
           pip install -r requirements.txt
 
       - name: Syntax check (py_compile)
-        run: python -m py_compile publish.py
+        run: python -m py_compile publish.py web.py
 
-      - name: Import & CLI smoke test (--help)
-        run: python publish.py --help
+      - name: Import & CLI smoke test
+        run: |
+          python publish.py --help
+          python -c "import web"
+
+      - name: WebUI serve smoke test
+        run: |
+          python web.py &
+          SRV=$!
+          sleep 3
+          curl -sf http://127.0.0.1:8000/ | grep -q "WebUI" && echo "WEB_OK"
+          kill $SRV
 
       - name: Lint with ruff (non-blocking)
         run: |
           pip install ruff
-          ruff check publish.py || true
+          ruff check publish.py web.py || true
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build package
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*

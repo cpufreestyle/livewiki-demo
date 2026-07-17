@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bilibili-publisher"
+version = "1.0.0"
+description = "B站视频上传 CLI + WebUI 工具：扫码登录、凭证持久化、自动重试"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "bilibili-api-python>=17.0.0",
+    "aiohttp",
+    "Flask>=3.0.0",
+]
+
+[project.scripts]
+bili-pub = "publish:cli"
+
+[tool.setuptools]
+py-modules = ["publish", "web"]

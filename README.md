@@ -2,81 +2,80 @@
 
 ![CI](https://github.com/cpufreestyle/bilibili-publisher/actions/workflows/ci.yml/badge.svg)
 
-基于 [bilibili-api-python](https://github.com/bilibili-API-collect/bilibili-API-collect) 的 B站视频上传命令行工具。直接调用 B站官方 API，**免费、本地运行、无需任何第三方付费服务**。扫码登录一次后凭证自动保存，之后上传免扫码。
+基于 [bilibili-api-python](https://github.com/bilibili-API-collect/bilibili-API-collect) 的 B站视频上传工具，提供 **命令行** 与 **WebUI** 两种用法。直接调用 B站官方 API，**免费、本地运行、无需任何第三方付费服务**。扫码登录一次后凭证自动保存，之后上传免扫码。
 
 ## 功能
 
-- 扫码登录（二维码有效期约 3 分钟，手机 B站 App 确认）
-- 登录凭证持久化到 `bili_credential.json`，下次运行免扫码
-- 视频上传（支持封面、标题、简介、标签、分区）
+- 扫码登录（二维码），凭证持久化到 `bili_credential.json`（仅本机）
+- 视频上传：支持封面、标题、简介、标签、分区
 - 上传失败自动重试 3 次（应对偶发网络抖动）
-
-## 依赖
-
-- Python 3.10+
-- bilibili-api-python >= 17.0.0
-- aiohttp
+- 两种入口：命令行 `publish.py` 与浏览器 `WebUI`
 
 ## 安装
 
 ```bash
-python -m venv .venv
-# Windows
-.venv\Scripts\pip install -r requirements.txt
-# macOS / Linux
-.venv/bin/pip install -r requirements.txt
+pip install -r requirements.txt
+# 或作为包安装（提供 bili-pub 命令）
+pip install .
 ```
 
-## 使用
-
-首次运行（生成二维码，手机扫码确认登录，随后自动上传）：
+## 用法一：命令行
 
 ```bash
-python publish.py \
-  --video ai-weekly.mp4 \
-  --cover cover.png \
-  --title "一周AI新闻速递 | AI Weekly #01" \
-  --desc "本集回顾本周 AI 领域 5 条重磅动态……" \
-  --tags "AI,人工智能,科技,新闻,每周速递" \
-  --tid 208
-```
+# 首次运行：生成二维码，手机 B站扫码并点「确认登录」
+python publish.py --video ai-weekly.mp4 --cover cover.png \
+    --title "一周AI新闻速递" --desc "简介" --tags "AI,科技" --tid 208
 
-凭证已保存后，再次运行会**自动跳过登录**直接上传。
-
-其他模式：
-
-```bash
 # 仅登录并保存凭证（不上传）
 python publish.py --login-only
 
-# 强制重新扫码登录（忽略已保存凭证）
-python publish.py --force-login --video ai-weekly.mp4 --title "..." --tags "AI"
+# 忽略已保存凭证，重新扫码
+python publish.py --force-login --video ai-weekly.mp4 --title "标题"
 ```
 
-参数说明：
+参数：
 
-| 参数 | 必填 | 说明 |
-|------|------|------|
-| `--video` | 是 | 视频文件路径 |
-| `--cover` | 否 | 封面图路径 |
-| `--title` | 是 | 视频标题（≤80 字） |
-| `--desc`  | 否 | 视频简介 |
-| `--tags`  | 否 | 标签，逗号分隔 |
-| `--tid`   | 否 | 分区 id，默认 `208`（科技） |
-| `--login-only` | 否 | 仅登录保存凭证 |
-| `--force-login` | 否 | 忽略已保存凭证重新登录 |
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `--video` | 视频文件路径（必填，WebUI 模式除外） | - |
+| `--cover` | 封面图路径（可选） | - |
+| `--title` | 视频标题（必填，WebUI 模式除外） | - |
+| `--desc` | 视频简介 | 空 |
+| `--tags` | 标签，逗号分隔 | 空 |
+| `--tid` | 分区 tid（208=科技，172=手机，17=单机游戏…） | 208 |
+| `--login-only` | 仅登录保存凭证，不上传 | 关 |
+| `--force-login` | 忽略已保存凭证，重新扫码 | 关 |
+
+## 用法二：WebUI（推荐非技术用户）
+
+```bash
+python publish.py --web --host 0.0.0.0 --port 8000
+# 浏览器打开 http://localhost:8000
+```
+
+页面内：点「生成登录二维码」→ 手机 B站扫码确认 → 填表选择视频/封面 → 点「发布」。发布成功直接显示 B站视频链接。
+
+## 常用分区 tid
+
+| tid | 分区 | tid | 分区 |
+|---|---|---|---|
+| 208 | 科技 | 172 | 手机 |
+| 17 | 单机游戏 | 65 | 网络游戏 |
+| 119 | 鬼畜 | 95 | 影视 |
+| 21 | 动画 | 201 | 娱乐 |
 
 ## 安全说明
 
-- 登录凭证仅保存在你本机的 `bili_credential.json`，**请勿提交到 Git 仓库**（已在 `.gitignore` 中排除）。
-- 上传操作需登录你本人的 B站账号，请自行对发布内容负责。
+- 本工具仅调用 B站官方 API，不经过任何第三方服务器。
+- 登录凭证保存在运行目录的 `bili_credential.json`，**请勿提交到公开仓库**（已写入 `.gitignore`）。
+- 发布操作需本人扫码确认，凭证不外传。
 
-## 分区 tid 参考
+## 开发
 
-- 科技 `208`
-- 动画 `19`
-- 游戏 `4`
-- 生活 `21`
-- 知识 `201`
+```bash
+pip install -e .
+pytest            # 暂无单测，可扩展
+python -m build   # 构建 wheel / sdist
+```
 
-完整分区见 B站创作中心。
+CI（GitHub Actions）会在 push/PR 时自动执行：依赖安装 → 语法检查 → CLI/WebUI 导入冒烟测试 → 启动 WebUI 并请求首页 → ruff 检查，并构建发布包。
