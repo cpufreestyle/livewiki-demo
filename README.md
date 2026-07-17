@@ -1,5 +1,7 @@
 # bilibili-publisher
 
+![CI](https://github.com/cpufreestyle/bilibili-publisher/actions/workflows/ci.yml/badge.svg)
+
 基于 [bilibili-api-python](https://github.com/bilibili-API-collect/bilibili-API-collect) 的 B站视频上传命令行工具。直接调用 B站官方 API，**免费、本地运行、无需任何第三方付费服务**。扫码登录一次后凭证自动保存，之后上传免扫码。
 
 ## 功能
