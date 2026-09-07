@@ -1128,6 +1128,80 @@ function downloadHtml() {
   a.click();
 }
 
+// 生成完整的自包含 HTML 档案（文档/摘要/脑图/Markdown/统计 + 源文本），内联 app.css 并切亮色
+async function buildExportHtml() {
+  if (!currentResult) return null;
+  const { stats } = currentResult;
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const doc = document.getElementById('tab-doc').innerHTML;
+  const summary = document.getElementById('tab-summary').innerHTML;
+  const markdown = document.getElementById('tab-markdown').innerHTML;
+  const statsHtml = document.getElementById('tab-stats').innerHTML;
+  let svgStr = '（思维导图未生成）';
+  const svgEl = document.querySelector('#mindmapSvgWrap svg');
+  if (svgEl) {
+    const clone = svgEl.cloneNode(true);
+    clone.removeAttribute('style');
+    clone.setAttribute('width', mmDims.W);
+    clone.setAttribute('height', mmDims.H);
+    clone.setAttribute('viewBox', '0 0 ' + mmDims.W + ' ' + mmDims.H);
+    svgStr = clone.outerHTML;
+  }
+  let css = '';
+  try { css = await (await fetch('app.css')).text(); } catch (e) { css = ''; }
+  const exportCss = `
+    :root{--bg:#ffffff;--surface:#ffffff;--surface2:#f8fafc;--text:#1f2937;--text-dim:#64748b;--border:#e2e8f0;--accent:#6366f1;}
+    body{background:#fff;color:var(--text);}
+    .export-section{margin:0 0 28px;padding-bottom:18px;border-bottom:1px solid #eef2f7;}
+    .export-section>h2{font-size:20px;margin:0 0 14px;color:#4338ca;border-bottom:2px solid #e0e7ff;padding-bottom:8px;}
+    svg{max-width:100%;height:auto;}
+    .markdown-view{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;background:#f8fafc;padding:14px;border-radius:8px;overflow:auto;}
+    details{margin:0 0 20px;background:#f8fafc;padding:10px 14px;border-radius:8px;}
+    details pre{white-space:pre-wrap;max-height:240px;overflow:auto;font-size:12px;}
+    .meta{color:#64748b;font-size:13px;}
+    .mindmap-controls{display:none;}
+  `;
+  const now = new Date().toLocaleString('zh-CN');
+  const raw = esc(currentRawText);
+  return '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>LiveWiki 完整学习档案</title><style>' + css + exportCss + '</style></head>' +
+    '<body style="max-width:900px;margin:32px auto;padding:0 20px;font-family:system-ui,\'PingFang SC\',\'Microsoft YaHei\',sans-serif;line-height:1.7;">' +
+    '<h1 style="font-size:26px;margin:0 0 6px;">📚 LiveWiki 完整学习档案</h1>' +
+    '<p class="meta">生成时间：' + now + ' · 原文 ' + stats.originalLength + ' 字 · 压缩率 ' + stats.compressionRatio + '</p>' +
+    '<details><summary>📜 查看 / 复制原文</summary><pre>' + raw + '</pre></details>' +
+    '<div class="export-section"><h2>📄 文档</h2>' + doc + '</div>' +
+    '<div class="export-section"><h2>✨ 摘要</h2>' + summary + '</div>' +
+    '<div class="export-section"><h2>🧠 思维导图</h2>' + svgStr + '</div>' +
+    '<div class="export-section"><h2>📝 Markdown</h2>' + markdown + '</div>' +
+    '<div class="export-section"><h2>📊 统计</h2>' + statsHtml + '</div>' +
+    '<footer class="meta" style="margin-top:24px;border-top:1px solid #eef2f7;padding-top:12px;">LiveWiki — 从"听过"到"学会"，从"碎片"到"体系"。</footer>' +
+    '</body></html>';
+}
+
+async function exportAll() {
+  const html = await buildExportHtml();
+  if (!html) { alert('请先生成结果再导出'); return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+  a.download = 'LiveWiki_完整学习档案.html';
+  a.click();
+}
+
+async function exportPdf() {
+  const html = await buildExportHtml();
+  if (!html) { alert('请先生成结果再导出'); return; }
+  const w = window.open('', '_blank');
+  if (!w) { alert('浏览器拦截了弹窗，请允许后重试，或改用「📦 导出全部」下载 HTML'); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+  const doPrint = () => { try { w.focus(); w.print(); } catch (e) {} };
+  if (w.document.readyState === 'complete') doPrint();
+  else w.onload = doPrint;
+  setTimeout(doPrint, 800); // 兜底：部分浏览器 write 后需延迟
+}
+
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
