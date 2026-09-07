@@ -4,20 +4,26 @@
 // 约定：处理函数接收 (res, body)，直接用 Node 风格的 res.writeHead / res.end 输出 JSON。
 // 这样在原生 http.Server 与 @vercel/node 的 Lambda res 上都能工作。
 
-import { execFile } from 'child_process';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
-import { resolveVideoUrl } from './resolve_video_url.js';
 
-// 判断一个 URL 是否为视频直链（扩展名须位于路径中，避免把 www.mov 之类域名误判）
-export const DIRECT_MEDIA_RE = /\/[^\/]*\.(mp4|m3u8|m3u|webm|mov|mkv|flv|ts|m4v|mp3|m4a|wav|aac|mpd)(\?|#|$)/i;
+import { MEDIA_EXT, MIN_TRANSCRIPT_CHARS } from '../lib/constants.mjs';
+import { createLogger } from '../lib/log.mjs';
+import { assertPublicUrl } from '../lib/url-guard.mjs';
+import { resolveVideoUrl } from './resolve_video_url.js';
+import { runTranscribe } from './transcribe_runner.mjs';
+
+const log = createLogger('handlers');
+
+// 与 resolver 共用同一份媒体扩展名定义（此前两处各写一份且此处漏了 ogg）
+export const DIRECT_MEDIA_RE = MEDIA_EXT;
 
 // 懒加载式解析包装：即使 Playwright 不可用也不要让整次请求崩溃
 export async function resolveRealVideoUrl(pageUrl, { cookies = '', phone = '' } = {}) {
   try {
     return await resolveVideoUrl(pageUrl, { cookies, phone });
   } catch (e) {
+    log.warn('链接解析异常:', e.message);
     return { ok: false, resolved: null, origin: '', candidates: [], method: 'error', error: e.message };
   }
 }
@@ -46,6 +52,12 @@ export function exportToWiki(result, sourceUrl, title = '') {
     let filePath = path.join(wikiDir, `${baseName}.md`);
     let i = 1;
     while (fs.existsSync(filePath)) { filePath = path.join(wikiDir, `${baseName}_${i++}.md`); }
+    // 二次校验：确保最终路径没有越出 wikiDir（防目录穿越）
+    const root = path.resolve(wikiDir);
+    if (!path.resolve(filePath).startsWith(root + path.sep)) {
+      log.warn('wiki 导出路径越界，已拒绝:', filePath);
+      return null;
+    }
     const fm = [
       '---',
       `title: "${baseName}"`,
@@ -63,7 +75,7 @@ export function exportToWiki(result, sourceUrl, title = '') {
     fs.writeFileSync(filePath, fm + (result.text || ''), 'utf8');
     return filePath;
   } catch (e) {
-    console.error('[wiki-export] 导出失败:', e.message);
+    log.error('wiki 导出失败:', e.message);
     return null;
   }
 }
@@ -73,6 +85,13 @@ export async function handleResolveVideo(res, body) {
   const pageUrl = body?.url;
   if (!pageUrl || !pageUrl.trim()) {
     json(res, 400, { error: '请提供页面 URL' });
+    return;
+  }
+  // SSRF 守卫：必须是可安全请求的公网 http(s) 地址
+  try {
+    assertPublicUrl(pageUrl);
+  } catch (e) {
+    json(res, 400, { error: e.message });
     return;
   }
   try {
@@ -89,6 +108,15 @@ export async function handleTranscribe(res, body) {
   const { url: videoUrl, skipDiarization, whisperModel, autoResolve, resolvedUrl, cookies, phone, title } = body || {};
   if (!videoUrl || !videoUrl.trim()) {
     json(res, 400, { error: '请提供视频 URL' });
+    return;
+  }
+
+  // SSRF 守卫
+  try {
+    assertPublicUrl(videoUrl);
+    if (resolvedUrl) assertPublicUrl(resolvedUrl);
+  } catch (e) {
+    json(res, 400, { error: e.message });
     return;
   }
 
@@ -119,7 +147,7 @@ export async function handleTranscribe(res, body) {
     resolveInfo.resolvedUrl = resolved.ok ? resolved.resolved : null;
     resolveInfo.error = resolved.error || null;
     if (resolved.ok && resolved.resolved) downloadUrl = resolved.resolved;
-    console.log(`[transcribe] 链接解析: method=${resolved.method} 命中=${resolved.ok} 候选数=${(resolved.candidates || []).length} → ${downloadUrl}`);
+    log.info(`链接解析: method=${resolved.method} 命中=${resolved.ok} 候选数=${(resolved.candidates || []).length}`);
   }
 
   // 自动解析失败，且原始 URL 并非直链：直接返回友好提示，避免后端盲下载浪费时间
@@ -132,73 +160,49 @@ export async function handleTranscribe(res, body) {
     return;
   }
 
-  const scriptPath = path.join(process.cwd(), 'scripts', 'transcribe.py');
-  const outputDir = path.join(os.tmpdir(), `livewiki_transcribe_${Date.now()}`);
-  const hfToken = process.env.HF_TOKEN || '';
-
-  const args = [
-    scriptPath,
-    '--url', downloadUrl,
-    '--output', outputDir,
-    '--whisper-model', whisperModel || 'small',
-  ];
-  // 优先使用本地模型
-  const localModelPath = path.join(process.cwd(), 'models', 'whisper-small');
-  if (fs.existsSync(path.join(localModelPath, 'model.bin'))) {
-    args.push('--model-path', localModelPath);
-  }
-  if (hfToken) args.push('--hf-token', hfToken);
-  if (skipDiarization) args.push('--skip-diarization');
-  // 携带落地页来源作为 Referer，绕过防盗链（解析到真实链接时才有意义）
-  if (resolveInfo.origin) { args.push('--referer', resolveInfo.origin); }
-
-  console.log(`[transcribe] 启动 Python 脚本: python3 ${args.join(' ')}`);
-
-  const child = execFile('python3', args, {
-    timeout: 900000, // 15 分钟超时
-    maxBuffer: 10 * 1024 * 1024,
-    env: { ...process.env },
-  }, (err, stdout, stderr) => {
-    if (err && err.killed) {
-      console.error('[transcribe] 超时或被终止');
-      json(res, 504, { error: '转写超时（超过 15 分钟），请尝试较短的音频', resolve: resolveInfo });
-      return;
-    }
-    if (err) {
-      console.error('[transcribe] Python 脚本失败:', err.message);
-      console.error('[transcribe] stderr:', stderr?.substring(0, 500));
-      json(res, 500, {
-        error: '转写失败: ' + (err.message || '未知错误'),
-        hint: '请确保已安装 yt-dlp, ffmpeg, faster-whisper',
-        stderr: stderr?.substring(0, 1000),
-        resolve: resolveInfo,
-      });
-      return;
-    }
-
-    try {
-      const result = JSON.parse(stdout.trim().split('\n').pop());
-      result.resolve = resolveInfo;
-      if (result.ok) {
-        console.log(`[transcribe] 成功: ${result.word_count} 字, ${result.segment_count} 片段`);
-        // 自动导出到 Obsidian wiki（若配置了 LW_WIKI_DIR）
-        const wikiPath = exportToWiki(result, videoUrl, title);
-        if (wikiPath) {
-          result.wikiExport = wikiPath;
-          console.log(`[transcribe] 已自动导出到 wiki: ${wikiPath}`);
-        }
-        json(res, 200, result);
-      } else {
-        json(res, 500, { error: result.error || '转写失败', resolve: resolveInfo });
-      }
-    } catch (parseErr) {
-      console.error('[transcribe] JSON 解析失败:', stdout.substring(0, 500));
-      json(res, 500, {
-        error: '转写结果解析失败',
-        stdout: stdout.substring(0, 1000),
-        stderr: stderr?.substring(0, 1000),
-        resolve: resolveInfo,
-      });
-    }
+  const out = await runTranscribe({
+    source: { type: 'url', value: downloadUrl },
+    whisperModel: whisperModel || 'small',
+    skipDiarization: !!skipDiarization,
+    referer: resolveInfo.origin || '',
   });
+
+  if (!out.ok) {
+    // 不回显 stdout/stderr：yt-dlp / ffmpeg 输出包含真实视频地址、Referer 与用户 Cookie
+    json(res, out.code, { error: out.error, hint: out.hint, resolve: resolveInfo });
+    return;
+  }
+
+  const result = out.result;
+  result.resolve = resolveInfo;
+  // 自动导出到 Obsidian wiki（若配置了 LW_WIKI_DIR）
+  const wikiPath = exportToWiki(result, videoUrl, title);
+  if (wikiPath) {
+    result.wikiExport = wikiPath;
+    log.info('已自动导出到 wiki:', wikiPath);
+  }
+  json(res, 200, result);
 }
+
+// ─── 从上传文件转写 ────────────────────────────────────────────────
+// 与 handleTranscribe 共用 runTranscribe，仅 source 类型与清理路径不同。
+export async function handleTranscribeFile(res, { file, whisperModel, skipDiarization, cleanupDirs = [] }) {
+  if (!file) {
+    json(res, 400, { error: '未找到上传文件' });
+    return;
+  }
+  const out = await runTranscribe({
+    source: { type: 'file', value: file.path },
+    whisperModel: whisperModel || 'small',
+    skipDiarization: !!skipDiarization,
+    cleanupPaths: cleanupDirs,
+  });
+
+  if (!out.ok) {
+    json(res, out.code, { error: out.error, hint: out.hint });
+    return;
+  }
+  json(res, 200, out.result);
+}
+
+export { MIN_TRANSCRIPT_CHARS };

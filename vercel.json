@@ -6,13 +6,14 @@
     { "src": "api/sample.js", "use": "@vercel/node" },
     { "src": "api/transcribe.mjs", "use": "@vercel/node" },
     { "src": "api/resolve-video.mjs", "use": "@vercel/node" },
-    { "src": "public/index.html", "use": "@vercel/static" }
+    { "src": "public/**", "use": "@vercel/static" }
   ],
   "routes": [
     { "src": "/api/process", "dest": "/api/process.js" },
     { "src": "/api/sample", "dest": "/api/sample.js" },
     { "src": "/api/transcribe", "dest": "/api/transcribe.mjs" },
     { "src": "/api/resolve-video", "dest": "/api/resolve-video.mjs" },
+    { "src": "/(.+\\.(?:css|js|mjs|png|svg|ico|woff2))$", "dest": "/public/$1" },
     { "src": "/(.*)", "dest": "/public/index.html" }
   ]
 }

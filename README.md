@@ -93,19 +93,39 @@ vercel --prod
 
 ```text
 livewiki-demo/
-├── server.js                 # 本地 Node.js 服务器（完整功能）
-├── public/
-│   └── index.html            # 前端 UI（含视频导入 / 逐字稿导入区域）
+├── server.js                 # 本地服务器：只做引导 + 分发
+├── routes/                   # 路由层（每个接口一个文件）
+│   ├── index.mjs             #   路由表与分发
+│   ├── process.mjs           #   POST /api/process（SSE 流式）
+│   ├── summarize.mjs         #   POST /api/summarize
+│   ├── sample.mjs            #   GET  /api/sample
+│   ├── last-transcript.mjs   #   GET  /api/last-transcript
+│   ├── transcribe.mjs        #   POST /api/transcribe
+│   ├── transcribe-file.mjs   #   POST /api/transcribe-file
+│   ├── transcribe-status.mjs #   GET  /api/transcribe/status
+│   └── resolve-video.mjs     #   POST /api/resolve-video
+├── lib/                      # 共享库（本地与 Vercel 双端复用）
+│   ├── pipeline.mjs          #   处理管线：清洗/切分/规则引擎/LLM/缓存
+│   ├── constants.mjs         #   全局常量（媒体特征、打分、超时、上限）
+│   ├── url-guard.mjs         #   SSRF 守卫
+│   ├── log.mjs               #   分级日志 + 敏感信息脱敏
+│   ├── http.mjs              #   CORS / JSON / 静态文件（含穿越防护）
+│   ├── env.mjs               #   .env 加载与 PATH 补齐
+│   ├── sse.mjs               #   SSE 辅助
+│   └── multipart.mjs         #   零依赖 multipart 解析
 ├── scripts/
 │   ├── transcribe.py         # Python 转写管线（yt-dlp + ffmpeg + whisper）
 │   ├── resolve_video_url.js  # 落地页真实视频链接多策略解析器
+│   ├── autofill_login.js     # 站点专属「免验证码报名」UI 自动化
+│   ├── transcribe_runner.mjs # 统一的 Python 转写执行器（含临时目录清理）
 │   └── server_handlers.mjs   # 解析 / 转写逻辑（server.js 与 Vercel 共用）
-├── api/
-│   ├── process.js            # Vercel Serverless: 结构化处理
-│   ├── sample.js             # Vercel Serverless: 示例数据
-│   ├── transcribe-status.js  # Vercel Serverless: 依赖检测
-│   ├── resolve-video.mjs     # Vercel Serverless: 解析落地页真实链接
-│   └── transcribe.mjs        # Vercel Serverless: 视频转写
+├── public/
+│   ├── index.html            # 页面结构
+│   ├── app.css               # 样式
+│   └── app.js                # 前端逻辑
+├── tests/                    # 单元测试（node:test，离线可跑）
+├── api/                      # Vercel Serverless 薄适配层
+├── .env.example              # 环境变量说明
 ├── vercel.json               # Vercel 部署配置
 ├── package.json
 └── README.md
@@ -138,6 +158,47 @@ livewiki-demo/
 2. **会议纪要**：会议录音转写 → 自动提取关键点和主题
 3. **播客整理**：播客视频 URL → 带发言人标签的摘要文档
 4. **培训资料**：培训视频 → 可搜索的知识库文档
+
+## 🧪 测试
+
+```bash
+npm test
+```
+
+基于 Node 内置 `node:test`，零额外依赖、完全离线可跑。当前覆盖：
+
+| 测试文件 | 覆盖内容 |
+| --- | --- |
+| `tests/url-guard.test.mjs` | SSRF 守卫：内网段、云元数据、十进制 / IPv4-mapped 绕过、协议白名单 |
+| `tests/static.test.mjs` | 静态文件服务与目录穿越防护 |
+| `tests/pipeline.test.mjs` | 清洗、关键词提取、章节切分、知识关联、端到端规则引擎链路 |
+
+## 🔒 安全说明
+
+v2.2 针对本地服务的暴露面做了收敛：
+
+- **SSRF 防护**：所有接受外部 URL 的接口（`/api/transcribe`、`/api/resolve-video`）都先经 `lib/url-guard.mjs` 校验，拦截内网段、`169.254.169.254` 等云元数据地址，以及十进制 / IPv4-mapped 形式的绕过；重定向目标同样会重新校验。
+- **凭据脱敏**：`HF_TOKEN` 改为经子进程环境变量传递，不再出现在命令行参数里；所有日志输出统一过 `redact()`。
+- **回显收敛**：不再把 yt-dlp / ffmpeg 的 `stdout` / `stderr` 直接回传给前端——其中可能包含真实视频地址、Referer 与用户粘贴的登录 Cookie。调试细节通过 `LW_DEBUG=1` 输出到服务端日志。
+- **CORS 默认同源**：原先固定 `Access-Control-Allow-Origin: *`，意味着任意网页都能调用本机全部接口。现默认不输出该头，需要跨域时显式设置 `LW_CORS_ORIGIN`。
+- **上传白名单**：上传文件扩展名走白名单，且不采用用户提供的 `filename` 拼路径。
+- **静态文件穿越防护**：解析后的真实路径必须仍在 `public/` 之内。
+
+> 注意：本项目定位为**本地开发 / 演示工具**，未内置鉴权与速率限制。若需部署到公网，请自行补充。
+
+## ⚙️ 环境变量
+
+完整列表见 `.env.example`，常用项：
+
+| 变量 | 说明 |
+| --- | --- |
+| `HF_TOKEN` | 说话人分离所需（不填则跳过该步骤） |
+| `LW_DEBUG` | 设为 `1` 输出被降级异常的详情 |
+| `LW_CORS_ORIGIN` | 需要跨域时显式指定来源 |
+| `LW_WIKI_DIR` | 自动导出转写到 Obsidian 目录 |
+| `LW_SPEAKER_MAP` | 自定义发言人显示名 |
+| `LW_RESOLVE_BUDGET_MS` | 链接解析的时间预算（毫秒） |
+| `LW_LLM_PROVIDER` | LLM 供应商尝试顺序 |
 
 ## 📝 License
 

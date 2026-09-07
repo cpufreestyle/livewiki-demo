@@ -1,0 +1,1135 @@
+// ── 全局错误守卫 ──
+// 屏蔽嵌入预览容器（CodeBuddy WebView）注入脚本产生的跨域/空节点测量错误，
+// 典型如 "Cannot read properties of null (reading 'getBoundingClientRect')"。
+// 这类错误来自预览环境本身，不影响本应用功能；对来自本页脚本的真实错误仍照常抛出。
+function _isHarnessError(e) {
+  const msg = (e && (e.message || (e.error && e.error.message))) || '';
+  const fn = (e && e.filename) || '';
+  return !fn
+    || fn === ''
+    || msg.includes('getBoundingClientRect')
+    || msg === 'Script error.'
+    || msg.includes('Script error');
+}
+window.addEventListener('error', function (e) {
+  if (_isHarnessError(e)) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    return false;
+  }
+}, true);
+// 兜底：个别浏览器/注入环境对跨域错误只走 onerror 分支，这里一并吞掉预览噪音
+window.onerror = function (message, source) {
+  const msg = String(message || '');
+  const src = String(source || '');
+  if (!src || src.indexOf('localhost') === -1 || msg.includes('getBoundingClientRect') || msg === 'Script error.') {
+    return true;
+  }
+  return false;
+};
+// 预览环境偶发的无关 Promise 拒绝，统一忽略避免污染控制台
+window.addEventListener('unhandledrejection', function (e) {
+  const reason = e && e.reason;
+  const msg = (reason && reason.message) || String(reason || '');
+  if (!msg || msg.includes('getBoundingClientRect') || msg === 'Script error.' || msg.includes('Script error')) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+  }
+});
+
+let currentResult = null;
+let currentRawText = '';
+
+// ─── 视频导入：Tab 切换 ───
+function switchImportTab(tab) {
+  document.getElementById('tabUrl').classList.toggle('active', tab === 'url');
+  document.getElementById('tabFile').classList.toggle('active', tab === 'file');
+  document.getElementById('importUrlPanel').classList.toggle('active', tab === 'url');
+  document.getElementById('importFilePanel').classList.toggle('active', tab === 'file');
+}
+
+// ─── 视频导入：文件选择 ───
+let selectedFile = null;
+
+function handleFileSelect(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  selectedFile = file;
+  
+  const zone = document.getElementById('fileDropZone');
+  zone.classList.add('has-file');
+  zone.querySelector('.file-drop-icon').textContent = '✅';
+  zone.querySelector('.file-drop-text').textContent = '已选择文件，点击重新选择';
+  
+  // 显示文件名
+  let nameEl = zone.querySelector('.file-name');
+  if (!nameEl) {
+    nameEl = document.createElement('div');
+    nameEl.className = 'file-name';
+    zone.appendChild(nameEl);
+  }
+  nameEl.textContent = `📄 ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
+  
+  document.getElementById('transcribeFileBtn').disabled = false;
+}
+
+// 拖拽支持
+document.addEventListener('DOMContentLoaded', () => {
+  const zone = document.getElementById('fileDropZone');
+  if (!zone) return;
+  
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      document.getElementById('videoFileInput').files = e.dataTransfer.files;
+      handleFileSelect({ target: { files: [file] } });
+    }
+  });
+});
+
+// ─── 草稿自动保存（localStorage，防误关丢失）───
+const DRAFT_KEY = 'livewiki_draft';
+(function initDraft() {
+  const ta = document.getElementById('inputText');
+  if (!ta) return;
+  try {
+    const saved = localStorage.getItem(DRAFT_KEY);
+    if (saved && !ta.value) ta.value = saved;
+  } catch {}
+  let t;
+  ta.addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(() => { try { localStorage.setItem(DRAFT_KEY, ta.value); } catch {} }, 600);
+  });
+
+  // 上传 Markdown / 文本文件：读取内容填入输入框并自动处理
+  const mdInput = document.getElementById('mdFileInput');
+  if (mdInput) mdInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) handleMdFile(file);
+    e.target.value = ''; // 允许重复选择同一文件
+  });
+})();
+
+// 读取本地 Markdown / 文本文件并填入输入框，随后自动结构化
+function handleMdFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const text = String(reader.result || '');
+    const ta = document.getElementById('inputText');
+    ta.value = text;
+    try { localStorage.setItem(DRAFT_KEY, text); } catch {}
+    processText();
+  };
+  reader.onerror = () => alert('读取文件失败：' + file.name);
+  reader.readAsText(file);
+}
+
+// ─── 视频导入：文件转写 ───
+async function transcribeFile() {
+  if (!selectedFile) {
+    alert('请先选择视频或音频文件');
+    return;
+  }
+
+  const skipDiarization = document.getElementById('skipDiarizationFile').checked;
+  const whisperModel = document.getElementById('whisperModelFile').value;
+  const btn = document.getElementById('transcribeFileBtn');
+  const progress = document.getElementById('importProgress');
+  const statusEl = document.getElementById('importStatus');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ 转写中...';
+  progress.style.display = 'flex';
+  progress.style.background = 'rgba(0,217,163,0.08)';
+  progress.style.borderColor = 'rgba(0,217,163,0.2)';
+  progress.style.color = 'var(--accent)';
+
+  const stages = [
+    { msg: '🎵 提取音频...', delay: 2000 },
+    { msg: '🗣️ Whisper 转写中（可能需要几分钟）...', delay: 8000 },
+    { msg: '👥 发言人识别中...', delay: 8000 },
+    { msg: '📝 生成逐字稿...', delay: 3000 },
+  ];
+  let stageIdx = 0;
+  const stageTimer = setInterval(() => {
+    if (stageIdx < stages.length) {
+      statusEl.textContent = stages[stageIdx].msg;
+      stageIdx++;
+    }
+  }, stages[Math.min(stageIdx, stages.length-1)]?.delay || 5000);
+
+  try {
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    formData.append('skipDiarization', skipDiarization);
+    formData.append('whisperModel', whisperModel);
+
+    const resp = await fetch('/api/transcribe-file', {
+      method: 'POST',
+      body: formData
+    });
+    const result = await safeJson(resp);
+
+    clearInterval(stageTimer);
+
+    if (result.ok) {
+      document.getElementById('inputText').value = result.text;
+      statusEl.textContent = `✅ 转写完成！${result.word_count} 字, ${result.segment_count} 片段, ${result.speakers.length} 位发言人`;
+      setTimeout(() => { progress.style.display = 'none'; }, 3000);
+    } else {
+      statusEl.textContent = `❌ ${result.error || '转写失败'}`;
+      progress.style.background = 'rgba(255,107,107,0.08)';
+      progress.style.borderColor = 'rgba(255,107,107,0.2)';
+      progress.style.color = 'var(--danger)';
+    }
+  } catch(e) {
+    clearInterval(stageTimer);
+    statusEl.textContent = `❌ 请求失败: ${e.message}`;
+    progress.style.background = 'rgba(255,107,107,0.08)';
+    progress.style.borderColor = 'rgba(255,107,107,0.2)';
+    progress.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 开始转写';
+  }
+}
+
+// ─── 视频导入：展开/收起 ───
+function toggleImport() {
+  const body = document.getElementById('importBody');
+  const toggle = document.getElementById('importToggle');
+  body.classList.toggle('collapsed');
+  toggle.classList.toggle('collapsed');
+}
+
+// 容错解析：后端返回非 JSON（如静态托管对 API 路由兜底返回 405 "Method Not Allowed"）时给出清晰报错
+async function safeJson(resp) {
+  const text = await resp.text();
+  if (!text) throw new Error(`服务器返回空响应（HTTP ${resp.status}）`);
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    let hint = '';
+    if (resp.status === 405) {
+      hint = '（后端 API 未生效：请通过 `node server.js` 启动本地服务，或确认 Vercel 已注册 /api 路由）';
+    }
+    throw new Error(`HTTP ${resp.status}：${text.slice(0, 80)}${hint}`);
+  }
+}
+
+// ─── 视频导入：解析真实链接（预览候选） ───
+async function resolveVideoLink() {
+  const url = document.getElementById('videoUrl').value.trim();
+  if (!url) {
+    alert('请输入页面 URL');
+    return;
+  }
+
+  const btn = document.getElementById('resolveBtn');
+  const statusEl = document.getElementById('importStatus');
+  const progress = document.getElementById('importProgress');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ 解析中...';
+  progress.style.display = 'flex';
+  progress.style.background = 'rgba(0,217,163,0.08)';
+  progress.style.borderColor = 'rgba(0,217,163,0.2)';
+  progress.style.color = 'var(--accent)';
+  statusEl.textContent = '🔎 正在嗅探页面中的真实视频链接...';
+
+  try {
+    const phone = (document.getElementById('phoneNumber').value || '').trim();
+    const cookies = (document.getElementById('cookieInput').value || '').trim();
+    const resp = await fetch('/api/resolve-video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, phone: phone || undefined, cookies: cookies || undefined })
+    });
+    const data = await safeJson(resp);
+
+    if (data.ok && data.candidates && data.candidates.length) {
+      const sel = document.getElementById('resolvedSelect');
+      sel.innerHTML = '';
+      data.candidates.forEach((c, i) => {
+        const opt = document.createElement('option');
+        opt.value = c.url;
+        const u = c.url.length > 90 ? c.url.substring(0, 90) + '...' : c.url;
+        opt.textContent = `#${i + 1} [${c.reason}] ${u}`;
+        sel.appendChild(opt);
+      });
+      sel.style.display = 'block';
+      statusEl.textContent = `✅ 找到 ${data.candidates.length} 个候选真实链接，已自动选中最可信的一个，可直接转写或手动切换`;
+    } else {
+      // 浏览器未装导致嗅探失败：给出明确安装提示，而不是笼统的“未找到”
+      if (data.method === 'browser-missing') {
+        statusEl.textContent = `❌ ${data.error}`;
+      } else {
+        statusEl.textContent = `❌ ${data.error || '未找到视频链接'}（可尝试取消「自动找真实链接」后直接转写；或确认该页无需登录/报名即可播放）`;
+        // 展示诊断线索，便于进一步定位真实链接
+        const d = data.diag;
+        if (d && (d.title || (d.iframes && d.iframes.length) || (d.hints && d.hints.length))) {
+          const box = document.createElement('div');
+          box.className = 'diag-box';
+          box.style.cssText = 'margin-top:8px;font-size:12px;color:var(--text-dim);white-space:pre-wrap;word-break:break-all;';
+          let txt = '🔍 诊断信息（可截图/复制发我协助定位）:\n';
+          if (d.title) txt += `页面标题: ${d.title}\n`;
+          if (d.iframes && d.iframes.length) txt += `iframe(${d.iframes.length}):\n  ${(d.iframes.slice(0, 5).join('\n  ') || '无')}\n`;
+          if (d.hints && d.hints.length) txt += `可疑链接(${d.hints.length}):\n  ${d.hints.slice(0, 8).join('\n  ')}\n`;
+          box.textContent = txt;
+          progress.appendChild(box);
+        }
+      }
+      progress.style.background = 'rgba(255,107,107,0.08)';
+      progress.style.borderColor = 'rgba(255,107,107,0.2)';
+      progress.style.color = 'var(--danger)';
+    }
+  } catch (e) {
+    statusEl.textContent = `❌ 解析失败: ${e.message}`;
+    progress.style.background = 'rgba(255,107,107,0.08)';
+    progress.style.borderColor = 'rgba(255,107,107,0.2)';
+    progress.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔎 解析链接';
+    // 有诊断信息时保留展示，方便复制线索；否则 3 秒后收起
+    if (!statusEl.textContent.startsWith('✅') && !progress.querySelector('.diag-box')) {
+      setTimeout(() => { progress.style.display = 'none'; }, 3000);
+    }
+  }
+}
+
+// ─── 视频导入：转写 ───
+async function transcribeVideo() {
+  const url = document.getElementById('videoUrl').value.trim();
+  if (!url) {
+    alert('请输入视频 URL');
+    return;
+  }
+
+  const skipDiarization = document.getElementById('skipDiarization').checked;
+  const whisperModel = document.getElementById('whisperModel').value;
+  const autoResolve = document.getElementById('autoResolve').checked;
+  const phone = (document.getElementById('phoneNumber').value || '').trim();
+  const cookies = (document.getElementById('cookieInput').value || '').trim();
+  const btn = document.getElementById('transcribeBtn');
+  const progress = document.getElementById('importProgress');
+  const statusEl = document.getElementById('importStatus');
+
+  // 若用户已在「解析链接」中选定了某个候选，则直接使用该真实链接
+  const sel = document.getElementById('resolvedSelect');
+  const resolvedUrl = (sel.style.display !== 'none' && sel.value) ? sel.value : null;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ 转写中...';
+  progress.style.display = 'flex';
+
+  // 模拟进度状态（开启自动解析时先定位链接）
+  const stages = autoResolve && !resolvedUrl
+    ? [
+        { msg: '🔎 正在定位页面中的真实视频链接...', delay: 4000 },
+        { msg: '📥 下载视频中...', delay: 3000 },
+        { msg: '🎵 提取音频...', delay: 3000 },
+        { msg: '🗣️ Whisper 转写中（可能需要几分钟）...', delay: 10000 },
+        { msg: '👥 发言人识别中...', delay: 8000 },
+        { msg: '📝 生成逐字稿...', delay: 3000 },
+      ]
+    : [
+        { msg: '📥 下载视频中...', delay: 3000 },
+        { msg: '🎵 提取音频...', delay: 3000 },
+        { msg: '🗣️ Whisper 转写中（可能需要几分钟）...', delay: 10000 },
+        { msg: '👥 发言人识别中...', delay: 8000 },
+        { msg: '📝 生成逐字稿...', delay: 3000 },
+      ];
+
+  let stageIdx = 0;
+  const stageTimer = setInterval(() => {
+    if (stageIdx < stages.length) {
+      statusEl.textContent = stages[stageIdx].msg;
+      stageIdx++;
+    }
+  }, stages[Math.min(stageIdx, stages.length - 1)]?.delay || 5000);
+
+  try {
+    const resp = await fetch('/api/transcribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, skipDiarization, whisperModel, autoResolve, resolvedUrl, phone: phone || undefined, cookies: cookies || undefined })
+    });
+    const result = await safeJson(resp);
+
+    clearInterval(stageTimer);
+
+    if (result.ok) {
+      // 填入文本框
+      document.getElementById('inputText').value = result.text;
+      // 解析信息提示
+      let resolveMsg = '';
+      const r = result.resolve;
+      if (r && r.resolved) {
+        resolveMsg = `（已自动定位真实链接 · 共 ${r.candidates?.length || 0} 个候选）`;
+      } else if (r && r.error) {
+        resolveMsg = `（未能自动定位链接，已尝试原地址）`;
+      }
+      statusEl.textContent = `✅ 转写完成！${result.word_count} 字, ${result.segment_count} 片段, ${result.speakers.length} 位发言人 ${resolveMsg}`;
+
+      // 显示发言人信息
+      setTimeout(() => {
+        progress.style.display = 'none';
+      }, 3000);
+    } else {
+      statusEl.textContent = `❌ ${result.error || '转写失败'}`;
+      progress.style.background = 'rgba(255,107,107,0.08)';
+      progress.style.borderColor = 'rgba(255,107,107,0.2)';
+      progress.style.color = 'var(--danger)';
+    }
+  } catch (e) {
+    clearInterval(stageTimer);
+    statusEl.textContent = `❌ 请求失败: ${e.message}`;
+    progress.style.background = 'rgba(255,107,107,0.08)';
+    progress.style.borderColor = 'rgba(255,107,107,0.2)';
+    progress.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 开始转写';
+  }
+}
+
+// ─── 加载示例 ───
+async function loadSample() {
+  try {
+    const resp = await fetch('/api/sample');
+    const data = await safeJson(resp);
+    document.getElementById('inputText').value = data.text;
+  } catch(e) {
+    console.error(e);
+  }
+}
+
+// ─── 导入本地已转写逐字稿并一键生成（/api/last-transcript → 结构化 → 摘要 → 脑图）───
+async function importTranscript() {
+  const btn = document.getElementById('importTranscriptBtn');
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 导入并生成中…'; }
+  try {
+    const resp = await fetch('/api/last-transcript');
+    const data = await safeJson(resp);
+    if (!data.ok) { alert('导入失败：' + (data.error || '未找到逐字稿')); return; }
+    document.getElementById('inputText').value = data.text;
+    // 关闭自动找链接（导入的是纯文本，无需再解析）
+    const ar = document.getElementById('autoResolve'); if (ar) ar.checked = false;
+    // processText 完成后会自动触发摘要 + 脑图生成
+    await processText();
+    alert(`已导入并生成（${data.chars} 字符逐字稿）\n文档 / 摘要 / 脑图 已全部就绪，右侧切换标签页查看。`);
+  } catch (e) {
+    console.error(e);
+    alert('导入出错：' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+// ─── 清空 ───
+function clearInput() {
+  document.getElementById('inputText').value = '';
+  try { localStorage.removeItem('livewiki_draft'); } catch {}
+  currentResult = null;
+  resetOutput();
+}
+
+// ─── 处理文本（SSE 流式，逐节呈现）───
+async function processText() {
+  const text = document.getElementById('inputText').value.trim();
+  if (text.length < 10) {
+    alert('请输入至少 10 个字符的逐字稿文本');
+    return;
+  }
+
+  const btn = document.getElementById('processBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ 处理中...';
+
+  // 重置输出 + 流式状态条
+  resetOutput();
+  let streamSections = [];
+  let streamStatusText = '正在连接…';
+  const setStatus = (msg) => {
+    streamStatusText = msg;
+    const el = document.getElementById('streamStatus');
+    if (el) el.textContent = msg;
+  };
+  const renderStream = () => {
+    document.getElementById('tab-doc').innerHTML =
+      `<div style="font-size:13px;color:var(--text-dim);padding:10px 0 4px;">${escapeHtml(streamStatusText)}</div>` +
+      buildDocHtml(streamSections, []);
+  };
+
+  document.getElementById('tab-doc').innerHTML = `
+    <div class="loading">
+      <div class="spinner"></div>
+      <div id="streamStatus">AI 正在处理逐字稿...（流式）</div>
+      <div style="font-size:12px; color:var(--text-dim);">
+        预处理 → 语义切分 → 内容结构化 → 知识关联 → 生成文档
+      </div>
+    </div>
+  `;
+  document.getElementById('tab-markdown').innerHTML = '<div class="loading"><div class="spinner"></div><div>生成中...</div></div>';
+  document.getElementById('tab-stats').innerHTML = '<div class="loading"><div class="spinner"></div><div>统计中...</div></div>';
+
+  try {
+    const resp = await fetch('/api/process?stream=1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    });
+    if (!resp.ok) {
+      let msg = 'HTTP ' + resp.status;
+      try { const d = await safeJson(resp); if (d && d.error) msg = d.error; } catch {}
+      throw new Error(msg);
+    }
+    // 浏览器不支持流式时退化到一次性 JSON
+    if (!resp.body || !resp.body.getReader) {
+      const result = await safeJson(resp);
+      currentResult = result;
+      currentRawText = text;
+      renderResult(result);
+      return;
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalResult = null;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const rawEvent = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const dataLine = rawEvent.split('\n').find(l => l.startsWith('data:'));
+        if (!dataLine) continue;
+        let ev;
+        try { ev = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
+        if (ev.type === 'status') {
+          streamStatusText = ev.payload.message;
+          const el = document.getElementById('streamStatus');
+          if (el) el.textContent = ev.payload.message;
+          else if (streamSections.some(Boolean)) renderStream(); // 已渲染章节后，刷新顶部状态条
+        } else if (ev.type === 'section') {
+          streamSections[ev.payload.index] = ev.payload.section;
+          renderStream();
+        } else if (ev.type === 'done') {
+          finalResult = ev.payload.result;
+          currentResult = finalResult;
+          currentRawText = text;
+          renderResult(finalResult);
+        } else if (ev.type === 'error') {
+          throw new Error(ev.payload.message || '流式处理出错');
+        }
+      }
+    }
+    if (!finalResult) throw new Error('流结束但未收到最终结果');
+  } catch(e) {
+    document.getElementById('tab-doc').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>处理失败: ${e.message}</div></div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⚡ 结构化处理';
+  }
+}
+
+// ─── 文档视图（结构化章节）───
+function buildDocHtml(structured, relations) {
+  let docHtml = `
+    <div class="pipeline">
+      <div class="pipeline-step done">✓ 预处理</div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step done">✓ 语义切分</div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step done">✓ 结构化</div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step done">✓ 知识关联</div>
+      <div class="pipeline-arrow">→</div>
+      <div class="pipeline-step done">✓ 生成文档</div>
+    </div>
+  `;
+
+  // 目录
+  docHtml += `<div class="toc"><div class="toc-title">📋 目录</div><div class="toc-list">`;
+  structured.forEach((s, i) => {
+    docHtml += `<div class="toc-item" onclick="scrollToSection(${i})">${i+1}. ${s.title}</div>`;
+  });
+  docHtml += `</div></div>`;
+
+  // 各章节
+  structured.forEach((s, i) => {
+    docHtml += `<div class="section" id="section-${i}">`;
+    docHtml += `<div class="section-title">${i+1}. ${s.title}</div>`;
+    docHtml += `<div class="section-summary">摘要：${s.summary}</div>`;
+    if (s.keyPoints.length > 0) {
+      docHtml += `<ul class="key-points">`;
+      s.keyPoints.forEach(kp => { docHtml += `<li>${kp}</li>`; });
+      docHtml += `</ul>`;
+    }
+    docHtml += `<div class="section-content">${s.content.join('\n\n')}</div>`;
+    docHtml += `</div>`;
+  });
+
+  // 知识关联
+  if (relations.length > 0) {
+    docHtml += `<div class="relations"><div class="relations-title">🔗 知识关联</div>`;
+    relations.forEach(r => {
+      docHtml += `<div class="relation-item">「${structured[r.from].title}」 ↔ 「${structured[r.to].title}」<br><span style="opacity:0.6">共同概念: ${r.sharedTerms.join(', ')}</span></div>`;
+    });
+    docHtml += `</div>`;
+  }
+
+  return docHtml;
+}
+
+// ─── 渲染结果 ───
+function renderResult(result) {
+  const { stats, structured, relations, output } = result;
+
+  document.getElementById('tab-doc').innerHTML = buildDocHtml(structured, relations);
+
+  // Markdown 视图
+  document.getElementById('tab-markdown').innerHTML = `<div class="markdown-view">${escapeHtml(output.markdown)}</div>`;
+
+  // 统计视图
+  document.getElementById('tab-stats').innerHTML = `
+    <div class="stats">
+      <div class="stat-card"><div class="stat-label">原始字数</div><div class="stat-value">${stats.originalLength}</div></div>
+      <div class="stat-card"><div class="stat-label">清洗后</div><div class="stat-value">${stats.cleanedLength}</div></div>
+      <div class="stat-card"><div class="stat-label">压缩率</div><div class="stat-value">${stats.compressionRatio}</div></div>
+      <div class="stat-card"><div class="stat-label">章节数</div><div class="stat-value">${stats.segmentCount}</div></div>
+      <div class="stat-card"><div class="stat-label">知识关联</div><div class="stat-value">${stats.relationCount}</div></div>
+      <div class="stat-card"><div class="stat-label">处理耗时</div><div class="stat-value">${stats.processingTime}ms</div></div>
+    </div>
+    <div style="margin:8px 0 14px; font-size:13px; display:flex; gap:8px; flex-wrap:wrap;">
+      ${stats.llmUsed
+        ? '<span style="color:#059669; background:#d1fae5; padding:4px 10px; border-radius:999px;">🟢 LLM 生成式归纳已启用</span>'
+        : '<span style="color:#b45309; background:#fef3c7; padding:4px 10px; border-radius:999px;">🟡 已降级为本地规则引擎（未启用 / 未成功调用 LLM）</span>'}
+      ${stats.cached ? '<span style="color:#2563eb; background:#dbeafe; padding:4px 10px; border-radius:999px;">⚡ 命中缓存·秒回</span>' : ''}
+    </div>
+    <div style="color:var(--text-dim); font-size:13px; padding:16px; background:var(--surface2); border-radius:8px;">
+      ${stats.tokenUsage
+        ? `<strong>💡 Token 真实用量（${stats.tokenUsage.provider} · ${stats.tokenUsage.model}）</strong><br><br>
+           输入: ${stats.tokenUsage.promptTokens} tokens<br>
+           输出: ${stats.tokenUsage.completionTokens} tokens<br>
+           合计: ${stats.tokenUsage.totalTokens} tokens`
+        : `<strong>💡 Token 成本估算（未接入 LLM，按字数粗估）</strong><br><br>
+           输入: ~${Math.ceil(stats.originalLength / 1.5)} tokens<br>
+           输出: ~${Math.ceil(stats.cleanedLength / 1.5)} tokens<br>
+           预估成本: ¥${(stats.originalLength / 1.5 * 0.00001 + stats.cleanedLength / 1.5 * 0.00003).toFixed(4)}`}
+      <br>
+      <strong>处理管线</strong><br>
+      Stage 1 预处理: 去除语气词、重复段落、口语化表达<br>
+      Stage 2 语义切分: 基于关键词的主题聚类<br>
+      Stage 3 内容结构化: 提取关键点 + 生成摘要<br>
+      Stage 4 知识关联: 跨章节词汇重叠检测<br>
+      Stage 5 输出: 生成带导航的 HTML + Markdown
+    </div>
+  `;
+
+  document.getElementById('exportBar').style.display = 'flex';
+
+  // ── 自动加载摘要 + 思维导图 ──
+  loadSummaryAndMindmap(result.structured, currentRawText);
+}
+
+// ─── 摘要 + 思维导图 ───
+let mindmapData = null;
+let mmDims = { W: 0, H: 0 };   // 当前脑图内容尺寸（用于缩放/导出）
+let mmView = null;             // 视口状态 { vx, vy, vw, vh, ready }
+let mmRadial = false;          // 是否为放射状布局
+let mmSearch = '';             // 脑图节点搜索关键字（小写）
+
+async function loadSummaryAndMindmap(structured, rawText) {
+  document.getElementById('tab-summary').innerHTML = '<div class="output-empty"><div class="big-icon" style="animation:spin 1.5s linear infinite;">⏳</div><div>正在生成精简摘要...</div></div>';
+  document.getElementById('tab-mindmap').innerHTML = '<div class="output-empty"><div class="big-icon" style="animation:spin 1.5s linear infinite;">⏳</div><div>正在生成思维导图...</div></div>';
+
+  try {
+    const resp = await fetch('/api/summarize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ structured, text: rawText })
+    });
+    const data = await safeJson(resp);
+
+    if (data.error) throw new Error(data.error);
+
+    // ── 渲染摘要 ──
+    const b = data.brief;
+    let sumHtml = `<div class="brief-card">`;
+    sumHtml += `<div class="brief-title">${b.title}</div>`;
+    sumHtml += `<div class="brief-overview">${b.overview}</div>`;
+    sumHtml += `<div class="brief-section"><div class="brief-section-title">🎯 核心要点</div><ul class="brief-takeaways">`;
+    b.keyTakeaways.forEach(kp => { sumHtml += `<li>${kp}</li>`; });
+    sumHtml += `</ul></div>`;
+    sumHtml += `<div class="brief-section"><div class="brief-section-title">📋 各章节摘要</div>`;
+    b.sectionSummaries.forEach(s => {
+      sumHtml += `<div class="brief-chapter"><span class="brief-chapter-num">${s.index}</span><div><strong>${s.title}</strong><br><span class="brief-chapter-summary">${s.summary}</span></div></div>`;
+    });
+    sumHtml += `</div></div>`;
+    document.getElementById('tab-summary').innerHTML = sumHtml;
+
+    // ── 渲染思维导图 ──
+    mindmapData = data.mindmap;
+    renderMindmap(mindmapData);
+  } catch(e) {
+    document.getElementById('tab-summary').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>摘要生成失败: ${e.message}</div></div>`;
+    document.getElementById('tab-mindmap').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>思维导图生成失败: ${e.message}</div></div>`;
+  }
+}
+
+function renderMindmap(data) {
+  mindmapData = data;
+  const container = document.getElementById('tab-mindmap');
+  container.innerHTML =
+    '<div class="mindmap-container"><div class="mindmap-controls" style="flex-wrap:wrap;">' +
+    '<button class="btn btn-secondary btn-sm" onclick="mmZoom(1.25)">🔍 放大</button>' +
+    '<button class="btn btn-secondary btn-sm" onclick="mmZoom(0.8)">🔍 缩小</button>' +
+    '<button class="btn btn-secondary btn-sm" onclick="mmFit()">⤢ 适配</button>' +
+    '<button class="btn btn-secondary btn-sm" id="mmLayoutBtn" onclick="mmToggleLayout()">🔘 放射状</button>' +
+    '<input id="mmSearch" class="mm-search" type="text" placeholder="🔍 搜索节点" oninput="mmSearchNodes(this.value)" value="' + mmSearch + '">' +
+    '<span class="mm-hint" style="font-size:12px;color:var(--text-dim);align-self:center;">滚轮缩放 · 拖拽平移 · 点击节点折叠/展开</span>' +
+    '<span style="flex:1;"></span>' +
+    '<button class="btn btn-primary btn-sm" onclick="downloadMindmap(\'svg\')">⬇️ SVG</button>' +
+    '<button class="btn btn-primary btn-sm" onclick="downloadMindmap(\'png\')">⬇️ PNG</button>' +
+    '</div><div id="mindmapSvgWrap" class="mindmap-svg-wrap" style="height:72vh;overflow:hidden;touch-action:none;"></div></div>';
+  mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: false };
+  drawMindmap();
+  attachMindmapInteractions(document.getElementById('mindmapSvgWrap'));
+}
+
+function drawMindmap() {
+  const wrap = document.getElementById('mindmapSvgWrap');
+  if (!wrap) return;
+  wrap.innerHTML = buildMindmapSvg(mindmapData);
+  if (!mmView.ready) {
+    mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: true };
+  }
+  applyView(wrap.querySelector('svg'));
+}
+
+function applyView(svg) {
+  if (!svg || !mmView || !mmView.ready) return;
+  svg.setAttribute('viewBox', mmView.vx + ' ' + mmView.vy + ' ' + mmView.vw + ' ' + mmView.vh);
+}
+
+function mmZoom(factor) {
+  const svg = document.querySelector('#mindmapSvgWrap svg');
+  if (svg) zoomView(svg, 0.5, 0.5, factor);
+}
+
+function mmFit() {
+  const svg = document.querySelector('#mindmapSvgWrap svg');
+  if (!svg) return;
+  mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: true };
+  applyView(svg);
+}
+
+function mmToggleLayout() {
+  mmRadial = !mmRadial;
+  mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: false }; // 切换后重新适配
+  drawMindmap();
+  const btn = document.getElementById('mmLayoutBtn');
+  if (btn) btn.textContent = mmRadial ? '🌳 树状' : '🔘 放射状';
+}
+
+// 脑图节点搜索：命中节点高亮描边，未命中淡出；清空即恢复
+function mmSearchNodes(q) {
+  mmSearch = (q || '').trim().toLowerCase();
+  drawMindmap(); // 保留当前缩放/平移视图
+}
+
+// 以 (px,py)∈[0,1] 为锚点缩放视图（鼠标位置/中心）
+function zoomView(svg, px, py, factor) {
+  const cx = mmView.vx + px * mmView.vw;
+  const cy = mmView.vy + py * mmView.vh;
+  let nvw = mmView.vw * factor;
+  const minVw = mmDims.W * 0.12, maxVw = mmDims.W * 5;
+  nvw = Math.max(minVw, Math.min(maxVw, nvw));
+  const ratio = mmView.vh / mmView.vw;
+  const nvh = nvw * ratio;
+  mmView.vx = cx - px * nvw;
+  mmView.vy = cy - py * nvh;
+  mmView.vw = nvw; mmView.vh = nvh;
+  applyView(svg);
+}
+
+function findMmNode(n, id) {
+  if (n._id === id) return n;
+  for (const c of (n.children || [])) {
+    const f = findMmNode(c, id);
+    if (f) return f;
+  }
+  return null;
+}
+
+function toggleMindmapNode(id) {
+  const node = mindmapData ? findMmNode(mindmapData, id) : null;
+  if (!node || !(node.children && node.children.length)) return;
+  node._collapsed = !node._collapsed;
+  mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: false }; // 折叠后重新适配
+  drawMindmap();
+}
+
+// 点击脑图节点 → 切换右侧文档标签页并滚动到对应章节（短暂高亮）
+function scrollToSectionFromMindmap(id) {
+  const node = mindmapData ? findMmNode(mindmapData, id) : null;
+  if (!node || node._sectionIndex == null) return;
+  switchTab('doc');
+  const el = document.getElementById('section-' + node._sectionIndex);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  el.style.outline = '2px solid var(--accent)';
+  el.style.outlineOffset = '4px';
+  el.style.borderRadius = '8px';
+  setTimeout(() => { el.style.outline = 'transparent'; }, 1500);
+}
+
+// 平移/缩放/折叠交互（监听挂在持久化的 wrap 上，每次重渲染会自动绑定到新 wrap）
+function attachMindmapInteractions(wrap) {
+  let dragging = false, lastX = 0, lastY = 0, moved = false;
+  wrap.addEventListener('wheel', (e) => {
+    const svg = wrap.querySelector('svg');
+    if (!svg || !mmView || !mmView.ready) return;
+    e.preventDefault();
+    const rect = svg.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width;
+    const py = (e.clientY - rect.top) / rect.height;
+    zoomView(svg, px, py, e.deltaY < 0 ? 0.85 : 1 / 0.85);
+  }, { passive: false });
+  wrap.addEventListener('pointerdown', (e) => {
+    dragging = true; moved = false; lastX = e.clientX; lastY = e.clientY;
+  });
+  wrap.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const svg = wrap.querySelector('svg');
+    if (!svg || !mmView || !mmView.ready) return;
+    const rect = svg.getBoundingClientRect();
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    mmView.vx -= dx * (mmView.vw / rect.width);
+    mmView.vy -= dy * (mmView.vh / rect.height);
+    lastX = e.clientX; lastY = e.clientY;
+    applyView(svg);
+  });
+  const endDrag = () => { dragging = false; };
+  wrap.addEventListener('pointerup', endDrag);
+  wrap.addEventListener('pointerleave', endDrag);
+  wrap.addEventListener('click', (e) => {
+    if (moved) return; // 拖拽结束不触发
+    const g = e.target.closest('[data-nid]');
+    if (!g) return;
+    const id = Number(g.getAttribute('data-nid'));
+    if (e.target.closest('[data-toggle]')) {
+      toggleMindmapNode(id);           // 点 ▸/▾ → 折叠/展开子树
+    } else {
+      scrollToSectionFromMindmap(id);  // 点节点主体 → 联动右侧文档
+    }
+  });
+}
+
+function buildMindmapSvg(root) {
+  const NODE_H_MIN = 44, H_GAP = 90, V_GAP = 18, PAD_X = 14, PAD_TOP = 11, LINE_H = 17;
+  const MAX_W = mmRadial ? 130 : 340;       // 放射状下节点更紧凑，缓解重叠
+  const RING_GAP = 160;
+  const FONT = "system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif";
+  const palette = ['#6366f1','#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6'];
+  const ROOT_COLOR = '#6366f1';
+  const textW = (s) => { let w = 0; for (const ch of (s||'')) w += /[\x00-\xff]/.test(ch) ? 8 : 15; return w; };
+  const WRAP_W = MAX_W - PAD_X * 2;
+  function wrapText(s, maxW) {
+    const out = []; let line = '';
+    for (const ch of String(s || '')) {
+      if (textW(line + ch) <= maxW) { line += ch; }
+      else { if (line) out.push(line.replace(/\s+$/, '')); line = (ch === ' ' || ch === '　') ? '' : ch; }
+    }
+    if (line) out.push(line.replace(/\s+$/, ''));
+    return out.length ? out : [''];
+  }
+  function wrapCapped(s, cap) {
+    const all = wrapText(s, WRAP_W);
+    if (all.length <= cap) return all;
+    const cut = all.slice(0, cap);
+    cut[cap - 1] = cut[cap - 1] + '…';
+    return cut;
+  }
+
+  let _id = 0;
+  function measure(n) {
+    n._id = _id++;
+    // 放射状：仅显示名称（1 行）以压缩体积；树状：名称≤2行 + 摘要≤3行
+    n._nameLines = wrapCapped(n.name || '', mmRadial ? 1 : 2);
+    n._sumLines = mmRadial ? [] : (n.summary ? wrapCapped(n.summary, 3) : []);
+    const longest = Math.max(
+      n._nameLines.reduce((m, l) => Math.max(m, textW(l)), 0),
+      n._sumLines.reduce((m, l) => Math.max(m, textW(l)), 0)
+    );
+    n.w = Math.max(90, Math.min(MAX_W, longest + PAD_X * 2));
+    const lines = n._nameLines.length + n._sumLines.length;
+    n.h = Math.max(NODE_H_MIN, PAD_TOP + lines * LINE_H);
+    const kids = n.children || [];
+    if (kids.length && !n._collapsed) {
+      let total = 0;
+      kids.forEach((c, i) => { total += measure(c); if (i) total += V_GAP; });
+      n.h = Math.max(n.h, total);
+    }
+    return n.h;
+  }
+  measure(root);
+
+  let maxX = 0, maxY = 0;
+  if (!mmRadial) {
+    // 树状：自左向右分层排列
+    function place(n, x, yTop) {
+      n.x = x; n.y = yTop + n.h / 2;
+      maxX = Math.max(maxX, x + n.w); maxY = Math.max(maxY, yTop + n.h);
+      const kids = n.children || [];
+      if (kids.length && !n._collapsed) {
+        const cx = x + n.w + H_GAP;
+        let cur = yTop;
+        kids.forEach(c => { place(c, cx, cur); cur += c.h + V_GAP; });
+      }
+    }
+    place(root, 20, 20);
+  } else {
+    // 放射状：根在圆心，叶子均分 360°，半径随层级递增（环距随叶子数自适应以缓解重叠）
+    let totalLeaves = 0;
+    (function count(n) {
+      const kids = (n.children && !n._collapsed) ? n.children : [];
+      if (!kids.length) { totalLeaves++; return; }
+      kids.forEach(count);
+    })(root);
+    const ringGap = Math.max(RING_GAP, totalLeaves * 7);
+    let leafIdx = 0;
+    (function assignAngle(n) {
+      const kids = (n.children && !n._collapsed) ? n.children : [];
+      if (!kids.length) { n._angle = (leafIdx + 0.5) / totalLeaves * Math.PI * 2; leafIdx++; return; }
+      kids.forEach(assignAngle);
+      n._angle = kids.reduce((s, c) => s + c._angle, 0) / kids.length;
+    })(root);
+    (function placeR(n, depth) {
+      const r = depth * ringGap;
+      const a = n._angle - Math.PI / 2;
+      n.x = r * Math.cos(a) - n.w / 2;   // 左坐标（与树状约定一致：n.x 左、n.y 中心）
+      n.y = r * Math.sin(a);
+      maxX = Math.max(maxX, n.x + n.w);
+      maxY = Math.max(maxY, n.y + n.h / 2);
+      (n.children && !n._collapsed ? n.children : []).forEach(c => placeR(c, depth + 1));
+    })(root, 0);
+    // 归一化：整体平移使最小坐标 ≥ 20
+    let minX = Infinity, minY = Infinity;
+    (function walk(n) {
+      minX = Math.min(minX, n.x); minY = Math.min(minY, n.y - n.h / 2);
+      (n.children && !n._collapsed ? n.children : []).forEach(walk);
+    })(root);
+    const dx = 20 - minX, dy = 20 - minY;
+    (function walk(n) { n.x += dx; n.y += dy; (n.children && !n._collapsed ? n.children : []).forEach(walk); })(root);
+    maxX += dx; maxY += dy;
+  }
+
+  const W = maxX + 40, H = maxY + 40;
+  mmDims = { W, H };
+  let defs = '', nodes = '', edges = '';
+  defs += '<style>.node:hover rect{stroke-width:2.5}</style>';
+  // 按"主题/分支"着色：根节点统一色，其每个一级子分支取一种颜色，后代继承所属分支颜色
+  (function walk(n, depth, branch, sectionIndex) {
+    const isRoot = depth === 0;
+    if (!isRoot) n._sectionIndex = sectionIndex; // 标记所属文档章节，用于点击联动
+    const col = isRoot ? ROOT_COLOR : palette[(branch + 1) % palette.length];
+    const yTop0 = n.y - n.h / 2;
+    const rid = 'mmc' + n._id;
+    const hasKids = (n.children && n.children.length) > 0;
+    const collapsible = hasKids && !isRoot; // 根节点整体不折叠，避免误收起整图
+    defs += '<clipPath id="' + rid + '"><rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10"/></clipPath>';
+    // 搜索：命中（名称/摘要包含关键字）高亮描边，未命中淡出
+    const hit = !mmSearch
+      || (n.name || '').toLowerCase().includes(mmSearch)
+      || (n.summary || '').toLowerCase().includes(mmSearch);
+    const gStyle = 'cursor:' + (collapsible ? 'pointer' : 'default') + (mmSearch && !hit ? ';opacity:0.18' : '');
+    nodes += '<g class="node" data-nid="' + n._id + '" clip-path="url(#' + rid + ')" style="' + gStyle + '">';
+    nodes += '<rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10" fill="' + (isRoot ? col : '#ffffff') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 2.5 : 1.5) + '"' + (isRoot ? '' : ' fill-opacity="0.05"') + '/>';
+    if (mmSearch && hit) {
+      nodes += '<rect x="' + (n.x + 1.5) + '" y="' + (yTop0 + 1.5) + '" width="' + (n.w - 3) + '" height="' + (n.h - 3) + '" rx="10" ry="10" fill="none" stroke="#00d9a3" stroke-width="3"/>';
+    }
+    let ty = yTop0 + PAD_TOP + 12;
+    n._nameLines.forEach(ln => {
+      nodes += '<text x="' + (n.x + PAD_X) + '" y="' + ty + '" font-family="' + FONT + '" font-size="' + (isRoot ? 15 : 13) + '" font-weight="' + (isRoot ? 800 : 600) + '" fill="' + (isRoot ? '#ffffff' : '#1f2937') + '">' + escapeXml(ln) + '</text>';
+      ty += LINE_H;
+    });
+    n._sumLines.forEach(ln => {
+      nodes += '<text x="' + (n.x + PAD_X) + '" y="' + ty + '" font-family="' + FONT + '" font-size="11" fill="#64748b">' + escapeXml(ln) + '</text>';
+      ty += LINE_H;
+    });
+    // 折叠/展开指示符（仅非根节点，点击 ▸/▾ 折叠；点节点主体则联动文档）
+    if (collapsible) {
+      nodes += '<text data-toggle="1" x="' + (n.x + 6) + '" y="' + (yTop0 + 15) + '" font-family="' + FONT + '" font-size="11" font-weight="700" fill="' + col + '" style="cursor:pointer;">' + (n._collapsed ? '▸' : '▾') + '</text>';
+    }
+    nodes += '</g>';
+    (n.children || []).forEach((c, i) => {
+      if (n._collapsed) return;
+      const childBranch = isRoot ? i : branch;
+      const childSection = isRoot ? i : sectionIndex;
+      const ccol = palette[(childBranch + 1) % palette.length];
+      let d;
+      if (mmRadial) {
+        // 放射状：节点中心连心线
+        d = 'M' + (n.x + n.w / 2) + ',' + n.y + ' L' + (c.x + c.w / 2) + ',' + c.y;
+      } else {
+        const x1 = n.x + n.w, y1 = n.y, x2 = c.x, y2 = c.y, mx = (x1 + x2) / 2;
+        d = 'M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2;
+      }
+      edges += '<path d="' + d + '" fill="none" stroke="' + ccol + '" stroke-width="1.5" stroke-opacity="0.5"/>';
+      walk(c, depth + 1, childBranch, childSection);
+    });
+  })(root, 0, 0, undefined);
+
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" font-family="' + FONT + '" style="width:100%;height:100%;background:#ffffff;display:block;">' +
+    '<defs>' + defs + '</defs>' + edges + nodes + '</svg>';
+}
+
+function escapeXml(s) {
+  return String(s).replace(/[<>&'"]/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;',"'":'&apos;','"':'&quot;' }[c]));
+}
+
+function downloadMindmap(fmt) {
+  const svg = document.querySelector('#mindmapSvgWrap svg');
+  if (!svg) { alert('请先生成思维导图'); return; }
+  // 导出完整脑图（忽略当前缩放/平移视图），并补全宽高以保证 PNG 有确定像素尺寸
+  const origVB = svg.getAttribute('viewBox');
+  const origW = svg.getAttribute('width');
+  const origH = svg.getAttribute('height');
+  svg.setAttribute('viewBox', '0 0 ' + mmDims.W + ' ' + mmDims.H);
+  svg.setAttribute('width', mmDims.W);
+  svg.setAttribute('height', mmDims.H);
+  const xml = new XMLSerializer().serializeToString(svg);
+  svg.setAttribute('viewBox', origVB);
+  if (origW) svg.setAttribute('width', origW); else svg.removeAttribute('width');
+  if (origH) svg.setAttribute('height', origH); else svg.removeAttribute('height');
+  if (fmt === 'svg') {
+    const url = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }));
+    triggerDownload(url, 'LiveWiki_思维导图.svg');
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }));
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2;
+    const w = mmDims.W, h = mmDims.H;
+    const canvas = document.createElement('canvas');
+    canvas.width = w * scale; canvas.height = h * scale;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(b => {
+      const png = URL.createObjectURL(b);
+      triggerDownload(png, 'LiveWiki_思维导图.png');
+      setTimeout(() => URL.revokeObjectURL(png), 2000);
+    }, 'image/png');
+  };
+  img.onerror = () => alert('PNG 生成失败，请改用 SVG 下载');
+  img.src = url;
+}
+
+function triggerDownload(href, name) {
+  const a = document.createElement('a');
+  a.href = href; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 2000);
+}
+
+// ─── 辅助函数 ───
+function resetOutput() {
+  document.getElementById('tab-doc').innerHTML = '<div class="output-empty"><div class="big-icon">📚</div><div>粘贴逐字稿并点击「结构化处理」</div><div style="font-size:13px;">AI 将自动清洗、切分、结构化你的课程内容</div></div>';
+  document.getElementById('tab-summary').innerHTML = '<div class="output-empty"><div class="big-icon">✨</div><div>处理完成后，精简摘要将在此显示</div></div>';
+  document.getElementById('tab-mindmap').innerHTML = '<div class="output-empty"><div class="big-icon">🧠</div><div>处理完成后，思维导图将在此显示</div></div>';
+  document.getElementById('tab-markdown').innerHTML = '<div class="output-empty"><div class="big-icon">📝</div><div>处理完成后，Markdown 将在此显示</div></div>';
+  document.getElementById('tab-stats').innerHTML = '<div class="output-empty"><div class="big-icon">📊</div><div>处理统计数据将在此显示</div></div>';
+  document.getElementById('exportBar').style.display = 'none';
+}
+
+function switchTab(name) {
+  const tabs = ['doc','summary','mindmap','markdown','stats'];
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', tabs[i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+}
+
+function scrollToSection(i) {
+  const el = document.getElementById('section-' + i);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function copyMarkdown() {
+  if (!currentResult) return;
+  navigator.clipboard.writeText(currentResult.output.markdown).then(() => {
+    alert('Markdown 已复制到剪贴板！');
+  });
+}
+
+function downloadMarkdown() {
+  if (!currentResult) return;
+  const blob = new Blob([currentResult.output.markdown], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'LiveWiki_结构化文档.md';
+  a.click();
+}
+
+// 生成一份独立可打开的 HTML 文档（自带样式，便于分享/归档）
+function downloadHtml() {
+  if (!currentResult) return;
+  const { structured, relations, stats } = currentResult;
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const body = structured.map((s, i) => {
+    const kp = (s.keyPoints || []).map(k => `<li>${esc(k)}</li>`).join('');
+    const content = (s.content || []).map(c => `<p>${esc(c)}</p>`).join('');
+    return `<section class="sec">
+      <h2>${i + 1}. ${esc(s.title)}</h2>
+      <p class="summary">摘要：${esc(s.summary)}</p>
+      ${kp ? `<ul>${kp}</ul>` : ''}
+      <div class="content">${content}</div>
+    </section>`;
+  }).join('\n');
+  const rel = (relations || []).map(r =>
+    `<li>「${esc(structured[r.from].title)}」 ↔ 「${esc(structured[r.to].title)}」（共同概念：${esc((r.sharedTerms || []).join(', '))}）</li>`
+  ).join('');
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>LiveWiki 结构化学习文档</title>
+<style>
+  body{font-family:system-ui,'PingFang SC','Microsoft YaHei',sans-serif;max-width:820px;margin:32px auto;padding:0 20px;color:#1f2937;line-height:1.7}
+  h1{font-size:24px} h2{font-size:19px;margin-top:28px;border-left:4px solid #6366f1;padding-left:10px}
+  .summary{color:#475569;background:#f8fafc;padding:8px 12px;border-radius:6px}
+  .content p{white-space:pre-wrap}
+  .relations{margin-top:28px;background:#fffbeb;padding:14px 18px;border-radius:8px}
+  .meta{color:#64748b;font-size:13px}
+</style></head><body>
+  <h1>LiveWiki 结构化学习文档</h1>
+  <p class="meta">由 LiveWiki AI 引擎自动生成 · 原文 ${stats.originalLength} 字 → 结构化 ${structured.reduce((a, s) => a + s.wordCount, 0)} 字</p>
+  ${body}
+  ${rel ? `<div class="relations"><h2>🔗 知识关联</h2><ul>${rel}</ul></div>` : ''}
+  <hr><p class="meta">LiveWiki — 从"听过"到"学会"，从"碎片"到"体系"。</p>
+</body></html>`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+  a.download = 'LiveWiki_结构化文档.html';
+  a.click();
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}

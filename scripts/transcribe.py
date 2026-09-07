@@ -9,11 +9,14 @@ LiveWiki — 视频逐字稿 + 发言人识别管线
 输出 JSON 到 stdout:
   {
     "ok": true,
-    "text": "【发言人A】\\n[00:01.23] 文本内容\\n...",
-    "speakers": [{"id": "SPEAKER_00", "name": "孟庆 (Blade Meng)", "segments": 15}],
+    "text": "【发言人 1】\\n[00:01.23] 文本内容\\n...",
+    "speakers": [{"id": "发言人 1", "name": "发言人 1", "segments": 15}],
     "duration": 3600.5,
     "word_count": 15000
   }
+
+约定：stdout 只输出一行 JSON，所有进度 / 错误堆栈一律走 stderr。
+      Node 侧取 stdout 最后一行解析，任何库污染 stdout 都会导致解析失败。
 """
 
 import os
@@ -22,8 +25,32 @@ import json
 import argparse
 import subprocess
 import tempfile
-import shutil
+import traceback
 from pathlib import Path
+
+# 已知演讲者映射（默认）。
+# 可通过环境变量 LW_SPEAKER_MAP 覆盖，格式："SPEAKER_00=张三,SPEAKER_01=李四"。
+DEFAULT_SPEAKER_MAP = {
+    "SPEAKER_00": "发言人 1",
+    "SPEAKER_01": "发言人 2",
+    "SPEAKER_02": "发言人 3",
+    "SPEAKER_03": "发言人 4",
+    "SPEAKER_04": "发言人 5",
+}
+
+
+def load_speaker_map():
+    """读取发言人映射：环境变量覆盖优先，缺省用内置默认值。"""
+    mapping = dict(DEFAULT_SPEAKER_MAP)
+    raw = os.environ.get("LW_SPEAKER_MAP", "")
+    for part in raw.split(","):
+        if "=" not in part:
+            continue
+        key, _, val = part.partition("=")
+        key, val = key.strip(), val.strip()
+        if key and val:
+            mapping[key] = val
+    return mapping
 
 def main():
     parser = argparse.ArgumentParser(description="LiveWiki 视频逐字稿 + 发言人识别")
@@ -52,6 +79,8 @@ def main():
     video_file = output_dir / "video.mp4"
     audio_file = output_dir / "audio.wav"
     transcript_file = output_dir / "transcript_with_speakers.txt"
+    # 仅记录「本次下载的」视频文件，收尾时清理；用户上传的原文件绝不删除
+    downloaded_video = None
 
     try:
         if args.file:
@@ -94,6 +123,7 @@ def main():
             # 检查视频文件
             if not video_file.exists() or video_file.stat().st_size == 0:
                 raise RuntimeError(f"视频下载失败: {video_file} 不存在或为空")
+            downloaded_video = video_file
 
         # ── Step 2: 提取音频 ──
         print("==> [2/4] 提取音频...", file=sys.stderr)
@@ -196,14 +226,8 @@ def main():
                     best_speaker = seg["speaker"]
             return best_speaker
 
-        # 已知演讲者映射（可手动调整）
-        SPEAKER_MAP = {
-            "SPEAKER_00": "发言人 1",
-            "SPEAKER_01": "发言人 2",
-            "SPEAKER_02": "发言人 3",
-            "SPEAKER_03": "发言人 4",
-            "SPEAKER_04": "发言人 5",
-        }
+        # 发言人映射（默认表 + 环境变量覆盖）
+        SPEAKER_MAP = load_speaker_map()
 
         # 生成逐字稿文本
         transcript_lines = []
@@ -251,13 +275,22 @@ def main():
         print(json.dumps(output, ensure_ascii=False))
 
     except Exception as e:
+        # 完整堆栈写 stderr，stdout 仍只保留一行 JSON，保证 Node 侧解析不受影响
+        print(traceback.format_exc(), file=sys.stderr)
         error_output = {"ok": False, "error": str(e)}
         print(json.dumps(error_output, ensure_ascii=False))
         sys.exit(1)
     finally:
-        # 清理音频文件（保留视频和逐字稿）
-        if audio_file.exists():
-            audio_file.unlink()
+        # 清理中间产物：提取出的音频 + 本次下载的原始视频（可达数百 MB）。
+        # 逐字稿 txt 体积很小，保留下来供调用方读取。
+        for leftover in (audio_file, downloaded_video):
+            if leftover is None:
+                continue
+            try:
+                if Path(leftover).exists():
+                    Path(leftover).unlink()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
