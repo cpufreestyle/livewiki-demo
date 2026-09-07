@@ -657,3 +657,35 @@
       margin-top: 6px;
       word-break: break-all;
     }
+
+    /* ─── 响应式 / 移动端适配 ─── */
+    @media (max-width: 860px) {
+      .header {
+        padding: 14px 16px;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .tagline { font-size: 12px; }
+      .badge { margin-left: 0; }
+      .container {
+        grid-template-columns: 1fr;
+        height: auto;
+        padding: 16px;
+        gap: 16px;
+      }
+      .panel { min-height: 280px; }
+      .panel-body { max-height: none; }
+      .input-area textarea { min-height: 240px; }
+      .toolbar { flex-wrap: wrap; padding: 12px; }
+      .btn { flex: 1 1 auto; justify-content: center; }
+      .tabs { overflow-x: auto; flex-wrap: nowrap; padding: 0 12px; }
+      .tab { white-space: nowrap; padding: 12px 10px; font-size: 13px; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .mindmap-controls { gap: 6px; }
+      .mm-search { width: 110px; }
+      .brief-card { padding: 16px; }
+    }
+    @media (max-width: 480px) {
+      .stats { grid-template-columns: 1fr; }
+      .badge { display: none; }
+    }

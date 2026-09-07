@@ -480,63 +480,85 @@ async function processText() {
   document.getElementById('tab-markdown').innerHTML = '<div class="loading"><div class="spinner"></div><div>生成中...</div></div>';
   document.getElementById('tab-stats').innerHTML = '<div class="loading"><div class="spinner"></div><div>统计中...</div></div>';
 
+  let serverError = false;
+  let finalResult = null;
+  const MAX_ATTEMPTS = 3;
+  let attempt = 0;
   try {
-    const resp = await fetch('/api/process?stream=1', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
-    });
-    if (!resp.ok) {
-      let msg = 'HTTP ' + resp.status;
-      try { const d = await safeJson(resp); if (d && d.error) msg = d.error; } catch {}
-      throw new Error(msg);
-    }
-    // 浏览器不支持流式时退化到一次性 JSON
-    if (!resp.body || !resp.body.getReader) {
-      const result = await safeJson(resp);
-      currentResult = result;
-      currentRawText = text;
-      renderResult(result);
-      return;
-    }
+  for (attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      if (attempt > 1) setStatus(`连接中断，正在重连 (${attempt}/${MAX_ATTEMPTS})…`);
+      else setStatus('正在连接…');
+      const resp = await fetch('/api/process?stream=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      if (!resp.ok) {
+        let msg = 'HTTP ' + resp.status;
+        try { const d = await safeJson(resp); if (d && d.error) msg = d.error; } catch {}
+        throw new Error(msg);
+      }
+      // 浏览器不支持流式时退化到一次性 JSON
+      if (!resp.body || !resp.body.getReader) {
+        const result = await safeJson(resp);
+        currentResult = result;
+        currentRawText = text;
+        renderResult(result);
+        return;
+      }
 
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let finalResult = null;
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buffer.indexOf('\n\n')) !== -1) {
-        const rawEvent = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        const dataLine = rawEvent.split('\n').find(l => l.startsWith('data:'));
-        if (!dataLine) continue;
-        let ev;
-        try { ev = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
-        if (ev.type === 'status') {
-          streamStatusText = ev.payload.message;
-          const el = document.getElementById('streamStatus');
-          if (el) el.textContent = ev.payload.message;
-          else if (streamSections.some(Boolean)) renderStream(); // 已渲染章节后，刷新顶部状态条
-        } else if (ev.type === 'section') {
-          streamSections[ev.payload.index] = ev.payload.section;
-          renderStream();
-        } else if (ev.type === 'done') {
-          finalResult = ev.payload.result;
-          currentResult = finalResult;
-          currentRawText = text;
-          renderResult(finalResult);
-        } else if (ev.type === 'error') {
-          throw new Error(ev.payload.message || '流式处理出错');
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const rawEvent = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const dataLine = rawEvent.split('\n').find(l => l.startsWith('data:'));
+          if (!dataLine) continue;
+          let ev;
+          try { ev = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
+          if (ev.type === 'status') {
+            streamStatusText = ev.payload.message;
+            const el = document.getElementById('streamStatus');
+            if (el) el.textContent = ev.payload.message;
+            else if (streamSections.some(Boolean)) renderStream(); // 已渲染章节后，刷新顶部状态条
+          } else if (ev.type === 'section') {
+            streamSections[ev.payload.index] = ev.payload.section;
+            renderStream();
+          } else if (ev.type === 'done') {
+            finalResult = ev.payload.result;
+            currentResult = finalResult;
+            currentRawText = text;
+            renderResult(finalResult);
+          } else if (ev.type === 'error') {
+            serverError = true;
+            throw new Error(ev.payload.message || '流式处理出错');
+          }
         }
       }
+      if (!finalResult) throw new Error('流结束但未收到最终结果');
+      break; // 成功完成
+    } catch (e) {
+      // 服务端逻辑错误（如配额/解析失败）不可重试，直接提示
+      if (serverError) {
+        document.getElementById('tab-doc').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>处理失败: ${escapeHtml(e.message)}</div><div style="font-size:13px;margin-top:10px;"><button class="btn btn-primary btn-sm" onclick="processText()">🔄 重试</button></div></div>`;
+        return;
+      }
+      // 传输层网络错误：按指数退避自动重连，最多 MAX_ATTEMPTS 次
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise(r => setTimeout(r, 700 * attempt));
+        continue;
+      }
+      document.getElementById('tab-doc').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>网络异常，已重连 ${attempt} 次仍中断</div><div style="font-size:12px;color:var(--text-dim);margin-top:6px;">${escapeHtml(e.message)}</div><div style="font-size:13px;margin-top:10px;"><button class="btn btn-primary btn-sm" onclick="processText()">🔄 重试</button></div></div>`;
+      return;
     }
-    if (!finalResult) throw new Error('流结束但未收到最终结果');
-  } catch(e) {
-    document.getElementById('tab-doc').innerHTML = `<div class="output-empty"><div class="big-icon">❌</div><div>处理失败: ${e.message}</div></div>`;
+  }
   } finally {
     btn.disabled = false;
     btn.textContent = '⚡ 结构化处理';
@@ -649,6 +671,14 @@ let mmDims = { W: 0, H: 0 };   // 当前脑图内容尺寸（用于缩放/导出
 let mmView = null;             // 视口状态 { vx, vy, vw, vh, ready }
 let mmRadial = false;          // 是否为放射状布局
 let mmSearch = '';             // 脑图节点搜索关键字（小写）
+let mmUseCanvas = false;       // 节点过多时改用 Canvas 渲染
+let mmNodes = [];              // 布局后的可见节点（SVG/Canvas 复用）
+let mmEdges = [];              // 布局后的连边（SVG/Canvas 复用）
+const MM_CANVAS_THRESHOLD = 120; // 可见节点超过该值切换 Canvas 渲染
+const MM_NODE_H_MIN = 44, MM_H_GAP = 90, MM_V_GAP = 18, MM_PAD_X = 14, MM_PAD_TOP = 11, MM_LINE_H = 17;
+const MM_FONT = "system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif";
+const MM_PALETTE = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6'];
+const MM_ROOT_COLOR = '#6366f1';
 
 async function loadSummaryAndMindmap(structured, rawText) {
   document.getElementById('tab-summary').innerHTML = '<div class="output-empty"><div class="big-icon" style="animation:spin 1.5s linear infinite;">⏳</div><div>正在生成精简摘要...</div></div>';
@@ -691,6 +721,8 @@ async function loadSummaryAndMindmap(structured, rawText) {
 function renderMindmap(data) {
   mindmapData = data;
   const container = document.getElementById('tab-mindmap');
+  const count = countVisibleNodes(data);
+  mmUseCanvas = count > MM_CANVAS_THRESHOLD;
   container.innerHTML =
     '<div class="mindmap-container"><div class="mindmap-controls" style="flex-wrap:wrap;">' +
     '<button class="btn btn-secondary btn-sm" onclick="mmZoom(1.25)">🔍 放大</button>' +
@@ -702,37 +734,42 @@ function renderMindmap(data) {
     '<span style="flex:1;"></span>' +
     '<button class="btn btn-primary btn-sm" onclick="downloadMindmap(\'svg\')">⬇️ SVG</button>' +
     '<button class="btn btn-primary btn-sm" onclick="downloadMindmap(\'png\')">⬇️ PNG</button>' +
-    '</div><div id="mindmapSvgWrap" class="mindmap-svg-wrap" style="height:72vh;overflow:hidden;touch-action:none;"></div></div>';
+    '</div>' +
+    (mmUseCanvas
+      ? '<canvas id="mindmapCanvas" class="mindmap-svg-wrap" style="height:72vh;width:100%;touch-action:none;display:block;border-radius:12px;background:#fff;"></canvas>'
+      : '<div id="mindmapSvgWrap" class="mindmap-svg-wrap" style="height:72vh;overflow:hidden;touch-action:none;"></div>') +
+    '</div>';
   mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: false };
   drawMindmap();
-  attachMindmapInteractions(document.getElementById('mindmapSvgWrap'));
+  if (mmUseCanvas) attachCanvasInteractions(document.getElementById('mindmapCanvas'));
+  else attachMindmapInteractions(document.getElementById('mindmapSvgWrap'));
 }
 
 function drawMindmap() {
+  if (mmUseCanvas) { drawMindmapCanvas(); mmView.ready = true; return; }
   const wrap = document.getElementById('mindmapSvgWrap');
   if (!wrap) return;
-  wrap.innerHTML = buildMindmapSvg(mindmapData);
-  if (!mmView.ready) {
-    mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: true };
-  }
-  applyView(wrap.querySelector('svg'));
+  layoutMindmap(mindmapData);
+  wrap.innerHTML = buildMindmapSvgString();
+  if (!mmView.ready) mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: true };
+  applyView();
 }
 
-function applyView(svg) {
+function applyView() {
+  if (mmUseCanvas) { drawMindmapCanvas(); return; }
+  const svg = document.querySelector('#mindmapSvgWrap svg');
   if (!svg || !mmView || !mmView.ready) return;
   svg.setAttribute('viewBox', mmView.vx + ' ' + mmView.vy + ' ' + mmView.vw + ' ' + mmView.vh);
 }
 
 function mmZoom(factor) {
-  const svg = document.querySelector('#mindmapSvgWrap svg');
-  if (svg) zoomView(svg, 0.5, 0.5, factor);
+  const el = mmUseCanvas ? document.getElementById('mindmapCanvas') : document.querySelector('#mindmapSvgWrap svg');
+  if (el) zoomView(el, 0.5, 0.5, factor);
 }
 
 function mmFit() {
-  const svg = document.querySelector('#mindmapSvgWrap svg');
-  if (!svg) return;
   mmView = { vx: 0, vy: 0, vw: mmDims.W, vh: mmDims.H, ready: true };
-  applyView(svg);
+  applyView();
 }
 
 function mmToggleLayout() {
@@ -761,7 +798,7 @@ function zoomView(svg, px, py, factor) {
   mmView.vx = cx - px * nvw;
   mmView.vy = cy - py * nvh;
   mmView.vw = nvw; mmView.vh = nvh;
-  applyView(svg);
+  applyView();
 }
 
 function findMmNode(n, id) {
@@ -838,15 +875,23 @@ function attachMindmapInteractions(wrap) {
   });
 }
 
-function buildMindmapSvg(root) {
-  const NODE_H_MIN = 44, H_GAP = 90, V_GAP = 18, PAD_X = 14, PAD_TOP = 11, LINE_H = 17;
+function escapeXml(s) {
+  return String(s).replace(/[<>&'"]/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;',"'":'&apos;','"':'&quot;' }[c]));
+}
+
+// 统计可见节点数（用于决定是否切换 Canvas 渲染）
+function countVisibleNodes(root) {
+  let c = 0;
+  (function w(n) { if (!n) return; c++; (n.children && !n._collapsed ? n.children : []).forEach(w); })(root);
+  return c;
+}
+
+// 一次性完成测量 + 布局，结果存入全局 mmNodes/mmEdges/mmDims，供 SVG 与 Canvas 复用
+function layoutMindmap(root) {
   const MAX_W = mmRadial ? 130 : 340;       // 放射状下节点更紧凑，缓解重叠
   const RING_GAP = 160;
-  const FONT = "system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif";
-  const palette = ['#6366f1','#0ea5e9','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6'];
-  const ROOT_COLOR = '#6366f1';
-  const textW = (s) => { let w = 0; for (const ch of (s||'')) w += /[\x00-\xff]/.test(ch) ? 8 : 15; return w; };
-  const WRAP_W = MAX_W - PAD_X * 2;
+  const textW = (s) => { let w = 0; for (const ch of (s || '')) w += /[\x00-\xff]/.test(ch) ? 8 : 15; return w; };
+  const WRAP_W = MAX_W - MM_PAD_X * 2;
   function wrapText(s, maxW) {
     const out = []; let line = '';
     for (const ch of String(s || '')) {
@@ -863,24 +908,22 @@ function buildMindmapSvg(root) {
     cut[cap - 1] = cut[cap - 1] + '…';
     return cut;
   }
-
   let _id = 0;
   function measure(n) {
     n._id = _id++;
-    // 放射状：仅显示名称（1 行）以压缩体积；树状：名称≤2行 + 摘要≤3行
     n._nameLines = wrapCapped(n.name || '', mmRadial ? 1 : 2);
     n._sumLines = mmRadial ? [] : (n.summary ? wrapCapped(n.summary, 3) : []);
     const longest = Math.max(
       n._nameLines.reduce((m, l) => Math.max(m, textW(l)), 0),
       n._sumLines.reduce((m, l) => Math.max(m, textW(l)), 0)
     );
-    n.w = Math.max(90, Math.min(MAX_W, longest + PAD_X * 2));
+    n.w = Math.max(90, Math.min(MAX_W, longest + MM_PAD_X * 2));
     const lines = n._nameLines.length + n._sumLines.length;
-    n.h = Math.max(NODE_H_MIN, PAD_TOP + lines * LINE_H);
+    n.h = Math.max(MM_NODE_H_MIN, MM_PAD_TOP + lines * MM_LINE_H);
     const kids = n.children || [];
     if (kids.length && !n._collapsed) {
       let total = 0;
-      kids.forEach((c, i) => { total += measure(c); if (i) total += V_GAP; });
+      kids.forEach((c, i) => { total += measure(c); if (i) total += MM_V_GAP; });
       n.h = Math.max(n.h, total);
     }
     return n.h;
@@ -889,20 +932,18 @@ function buildMindmapSvg(root) {
 
   let maxX = 0, maxY = 0;
   if (!mmRadial) {
-    // 树状：自左向右分层排列
     function place(n, x, yTop) {
       n.x = x; n.y = yTop + n.h / 2;
       maxX = Math.max(maxX, x + n.w); maxY = Math.max(maxY, yTop + n.h);
       const kids = n.children || [];
       if (kids.length && !n._collapsed) {
-        const cx = x + n.w + H_GAP;
+        const cx = x + n.w + MM_H_GAP;
         let cur = yTop;
-        kids.forEach(c => { place(c, cx, cur); cur += c.h + V_GAP; });
+        kids.forEach(c => { place(c, cx, cur); cur += c.h + MM_V_GAP; });
       }
     }
     place(root, 20, 20);
   } else {
-    // 放射状：根在圆心，叶子均分 360°，半径随层级递增（环距随叶子数自适应以缓解重叠）
     let totalLeaves = 0;
     (function count(n) {
       const kids = (n.children && !n._collapsed) ? n.children : [];
@@ -920,13 +961,11 @@ function buildMindmapSvg(root) {
     (function placeR(n, depth) {
       const r = depth * ringGap;
       const a = n._angle - Math.PI / 2;
-      n.x = r * Math.cos(a) - n.w / 2;   // 左坐标（与树状约定一致：n.x 左、n.y 中心）
+      n.x = r * Math.cos(a) - n.w / 2;
       n.y = r * Math.sin(a);
-      maxX = Math.max(maxX, n.x + n.w);
-      maxY = Math.max(maxY, n.y + n.h / 2);
+      maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h / 2);
       (n.children && !n._collapsed ? n.children : []).forEach(c => placeR(c, depth + 1));
     })(root, 0);
-    // 归一化：整体平移使最小坐标 ≥ 20
     let minX = Infinity, minY = Infinity;
     (function walk(n) {
       minX = Math.min(minX, n.x); minY = Math.min(minY, n.y - n.h / 2);
@@ -939,69 +978,216 @@ function buildMindmapSvg(root) {
 
   const W = maxX + 40, H = maxY + 40;
   mmDims = { W, H };
-  let defs = '', nodes = '', edges = '';
-  defs += '<style>.node:hover rect{stroke-width:2.5}</style>';
-  // 按"主题/分支"着色：根节点统一色，其每个一级子分支取一种颜色，后代继承所属分支颜色
+
+  // 收集可见节点与连边（供 SVG / Canvas 复用）
+  mmNodes = []; mmEdges = [];
   (function walk(n, depth, branch, sectionIndex) {
     const isRoot = depth === 0;
-    if (!isRoot) n._sectionIndex = sectionIndex; // 标记所属文档章节，用于点击联动
-    const col = isRoot ? ROOT_COLOR : palette[(branch + 1) % palette.length];
-    const yTop0 = n.y - n.h / 2;
-    const rid = 'mmc' + n._id;
+    if (!isRoot) n._sectionIndex = sectionIndex;
+    const col = isRoot ? MM_ROOT_COLOR : MM_PALETTE[(branch + 1) % MM_PALETTE.length];
     const hasKids = (n.children && n.children.length) > 0;
-    const collapsible = hasKids && !isRoot; // 根节点整体不折叠，避免误收起整图
-    defs += '<clipPath id="' + rid + '"><rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10"/></clipPath>';
-    // 搜索：命中（名称/摘要包含关键字）高亮描边，未命中淡出
+    const collapsible = hasKids && !isRoot;
     const hit = !mmSearch
       || (n.name || '').toLowerCase().includes(mmSearch)
       || (n.summary || '').toLowerCase().includes(mmSearch);
-    const gStyle = 'cursor:' + (collapsible ? 'pointer' : 'default') + (mmSearch && !hit ? ';opacity:0.18' : '');
-    nodes += '<g class="node" data-nid="' + n._id + '" clip-path="url(#' + rid + ')" style="' + gStyle + '">';
-    nodes += '<rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10" fill="' + (isRoot ? col : '#ffffff') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 2.5 : 1.5) + '"' + (isRoot ? '' : ' fill-opacity="0.05"') + '/>';
-    if (mmSearch && hit) {
-      nodes += '<rect x="' + (n.x + 1.5) + '" y="' + (yTop0 + 1.5) + '" width="' + (n.w - 3) + '" height="' + (n.h - 3) + '" rx="10" ry="10" fill="none" stroke="#00d9a3" stroke-width="3"/>';
-    }
-    let ty = yTop0 + PAD_TOP + 12;
-    n._nameLines.forEach(ln => {
-      nodes += '<text x="' + (n.x + PAD_X) + '" y="' + ty + '" font-family="' + FONT + '" font-size="' + (isRoot ? 15 : 13) + '" font-weight="' + (isRoot ? 800 : 600) + '" fill="' + (isRoot ? '#ffffff' : '#1f2937') + '">' + escapeXml(ln) + '</text>';
-      ty += LINE_H;
-    });
-    n._sumLines.forEach(ln => {
-      nodes += '<text x="' + (n.x + PAD_X) + '" y="' + ty + '" font-family="' + FONT + '" font-size="11" fill="#64748b">' + escapeXml(ln) + '</text>';
-      ty += LINE_H;
-    });
-    // 折叠/展开指示符（仅非根节点，点击 ▸/▾ 折叠；点节点主体则联动文档）
-    if (collapsible) {
-      nodes += '<text data-toggle="1" x="' + (n.x + 6) + '" y="' + (yTop0 + 15) + '" font-family="' + FONT + '" font-size="11" font-weight="700" fill="' + col + '" style="cursor:pointer;">' + (n._collapsed ? '▸' : '▾') + '</text>';
-    }
-    nodes += '</g>';
+    mmNodes.push({ n, isRoot, col, collapsible, hit, _id: n._id });
     (n.children || []).forEach((c, i) => {
       if (n._collapsed) return;
       const childBranch = isRoot ? i : branch;
       const childSection = isRoot ? i : sectionIndex;
-      const ccol = palette[(childBranch + 1) % palette.length];
-      let d;
-      if (mmRadial) {
-        // 放射状：节点中心连心线
-        d = 'M' + (n.x + n.w / 2) + ',' + n.y + ' L' + (c.x + c.w / 2) + ',' + c.y;
-      } else {
-        const x1 = n.x + n.w, y1 = n.y, x2 = c.x, y2 = c.y, mx = (x1 + x2) / 2;
-        d = 'M' + x1 + ',' + y1 + ' C' + mx + ',' + y1 + ' ' + mx + ',' + y2 + ' ' + x2 + ',' + y2;
-      }
-      edges += '<path d="' + d + '" fill="none" stroke="' + ccol + '" stroke-width="1.5" stroke-opacity="0.5"/>';
+      const ccol = MM_PALETTE[(childBranch + 1) % MM_PALETTE.length];
+      let e;
+      if (mmRadial) e = { x1: n.x + n.w / 2, y1: n.y, x2: c.x + c.w / 2, y2: c.y, radial: true, col: ccol };
+      else { const x1 = n.x + n.w, y1 = n.y, x2 = c.x, y2 = c.y, mx = (x1 + x2) / 2; e = { x1, y1, x2, y2, mx, radial: false, col: ccol }; }
+      mmEdges.push(e);
       walk(c, depth + 1, childBranch, childSection);
     });
   })(root, 0, 0, undefined);
+}
 
-  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" font-family="' + FONT + '" style="width:100%;height:100%;background:#ffffff;display:block;">' +
+// 由布局结果生成 SVG 字符串（与 Canvas 共用同一套几何，保证两种模式视觉一致）
+function buildMindmapSvgString() {
+  layoutMindmap(mindmapData);
+  const { W, H } = mmDims;
+  let defs = '', nodes = '', edges = '';
+  defs += '<style>.node:hover rect{stroke-width:2.5}</style>';
+  mmNodes.forEach(item => {
+    const { n, isRoot, col, collapsible, hit, _id } = item;
+    const yTop0 = n.y - n.h / 2;
+    const rid = 'mmc' + _id;
+    const gStyle = 'cursor:' + (collapsible ? 'pointer' : 'default') + (mmSearch && !hit ? ';opacity:0.18' : '');
+    defs += '<clipPath id="' + rid + '"><rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10"/></clipPath>';
+    nodes += '<g class="node" data-nid="' + _id + '" clip-path="url(#' + rid + ')" style="' + gStyle + '">';
+    nodes += '<rect x="' + n.x + '" y="' + yTop0 + '" width="' + n.w + '" height="' + n.h + '" rx="10" ry="10" fill="' + (isRoot ? col : '#ffffff') + '" stroke="' + col + '" stroke-width="' + (isRoot ? 2.5 : 1.5) + '"' + (isRoot ? '' : ' fill-opacity="0.05"') + '/>';
+    if (mmSearch && hit) {
+      nodes += '<rect x="' + (n.x + 1.5) + '" y="' + (yTop0 + 1.5) + '" width="' + (n.w - 3) + '" height="' + (n.h - 3) + '" rx="10" ry="10" fill="none" stroke="#00d9a3" stroke-width="3"/>';
+    }
+    let ty = yTop0 + MM_PAD_TOP + 12;
+    n._nameLines.forEach(ln => {
+      nodes += '<text x="' + (n.x + MM_PAD_X) + '" y="' + ty + '" font-family="' + MM_FONT + '" font-size="' + (isRoot ? 15 : 13) + '" font-weight="' + (isRoot ? 800 : 600) + '" fill="' + (isRoot ? '#ffffff' : '#1f2937') + '">' + escapeXml(ln) + '</text>';
+      ty += MM_LINE_H;
+    });
+    n._sumLines.forEach(ln => {
+      nodes += '<text x="' + (n.x + MM_PAD_X) + '" y="' + ty + '" font-family="' + MM_FONT + '" font-size="11" fill="#64748b">' + escapeXml(ln) + '</text>';
+      ty += MM_LINE_H;
+    });
+    if (collapsible) {
+      nodes += '<text data-toggle="1" x="' + (n.x + 6) + '" y="' + (yTop0 + 15) + '" font-family="' + MM_FONT + '" font-size="11" font-weight="700" fill="' + col + '" style="cursor:pointer;">' + (n._collapsed ? '▸' : '▾') + '</text>';
+    }
+    nodes += '</g>';
+  });
+  mmEdges.forEach(e => {
+    const d = e.radial
+      ? 'M' + e.x1 + ',' + e.y1 + ' L' + e.x2 + ',' + e.y2
+      : 'M' + e.x1 + ',' + e.y1 + ' C' + e.mx + ',' + e.y1 + ' ' + e.mx + ',' + e.y2 + ' ' + e.x2 + ',' + e.y2;
+    edges += '<path d="' + d + '" fill="none" stroke="' + e.col + '" stroke-width="1.5" stroke-opacity="0.5"/>';
+  });
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" font-family="' + MM_FONT + '" style="width:100%;height:100%;background:#ffffff;display:block;">' +
     '<defs>' + defs + '</defs>' + edges + nodes + '</svg>';
 }
 
-function escapeXml(s) {
-  return String(s).replace(/[<>&'"]/g, c => ({ '<':'&lt;','>':'&gt;','&':'&amp;',"'":'&apos;','"':'&quot;' }[c]));
+// ─── Canvas 模式：超大图（>120 节点）的高性能渲染 ───
+function roundRectPath(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawMindmapCanvas() {
+  const canvas = document.getElementById('mindmapCanvas');
+  if (!canvas) return;
+  const cssW = canvas.clientWidth || 600, cssH = canvas.clientHeight || 400;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const s = mmView.vw > 0 ? cssW / mmView.vw : 1;
+  const drawH = mmView.vh * s;
+  const offY = (cssH - drawH) / 2;
+  paintCanvas(ctx, mmView.vx, mmView.vy, s, 0, offY, cssW, cssH);
+}
+
+function paintCanvas(ctx, vx, vy, s, offX, offY, cssW, cssH) {
+  ctx.clearRect(0, 0, cssW, cssH);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cssW, cssH);
+  const mapX = (cx) => (cx - vx) * s + offX;
+  const mapY = (cy) => (cy - vy) * s + offY;
+  // 连边
+  ctx.lineWidth = Math.max(1, 1.5 * s);
+  mmEdges.forEach(e => {
+    ctx.beginPath();
+    if (e.radial) { ctx.moveTo(mapX(e.x1), mapY(e.y1)); ctx.lineTo(mapX(e.x2), mapY(e.y2)); }
+    else { const mx = (e.x1 + e.x2) / 2; ctx.moveTo(mapX(e.x1), mapY(e.y1)); ctx.bezierCurveTo(mapX(mx), mapY(e.y1), mapX(mx), mapY(e.y2), mapX(e.x2), mapY(e.y2)); }
+    ctx.globalAlpha = 0.5; ctx.strokeStyle = e.col; ctx.stroke();
+  });
+  ctx.globalAlpha = 1;
+  // 节点
+  mmNodes.forEach(item => {
+    const { n, isRoot, col, collapsible, hit } = item;
+    const x = mapX(n.x), y = mapY(n.y - n.h / 2);
+    const w = n.w * s, h = n.h * s;
+    roundRectPath(ctx, x, y, w, h, 10 * s);
+    ctx.fillStyle = isRoot ? col : '#ffffff';
+    ctx.fill();
+    if (!isRoot) { ctx.fillStyle = 'rgba(99,102,241,0.05)'; ctx.fill(); }
+    ctx.lineWidth = Math.max(1, (isRoot ? 2.5 : 1.5) * s);
+    ctx.strokeStyle = col; ctx.stroke();
+    if (mmSearch && hit) { ctx.lineWidth = Math.max(1, 3 * s); ctx.strokeStyle = '#00d9a3'; ctx.stroke(); }
+    // 文字（裁剪到节点内，避免长文本溢出）
+    ctx.save();
+    roundRectPath(ctx, x, y, w, h, 10 * s); ctx.clip();
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = isRoot ? '#ffffff' : '#1f2937';
+    ctx.font = (isRoot ? 800 : 600) + ' ' + ((isRoot ? 15 : 13) * s) + 'px ' + MM_FONT;
+    let ty = y + MM_PAD_TOP * s + 12 * s;
+    n._nameLines.forEach(ln => { ctx.fillText(ln, x + MM_PAD_X * s, ty); ty += MM_LINE_H * s; });
+    ctx.fillStyle = '#64748b';
+    ctx.font = '400 ' + (11 * s) + 'px ' + MM_FONT;
+    n._sumLines.forEach(ln => { ctx.fillText(ln, x + MM_PAD_X * s, ty); ty += MM_LINE_H * s; });
+    ctx.restore();
+    if (collapsible) {
+      ctx.fillStyle = col; ctx.font = '700 ' + (11 * s) + 'px ' + MM_FONT;
+      ctx.fillText(n._collapsed ? '▸' : '▾', x + 6 * s, y + 15 * s);
+    }
+    if (mmSearch && !hit) { ctx.globalAlpha = 0.8; ctx.fillStyle = '#ffffff'; roundRectPath(ctx, x, y, w, h, 10 * s); ctx.fill(); ctx.globalAlpha = 1; }
+  });
+}
+
+function attachCanvasInteractions(canvas) {
+  let dragging = false, lastX = 0, lastY = 0, moved = false;
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width;
+    const py = (e.clientY - rect.top) / rect.height;
+    zoomView(canvas, px, py, e.deltaY < 0 ? 0.85 : 1 / 0.85);
+  }, { passive: false });
+  canvas.addEventListener('pointerdown', (e) => { dragging = true; moved = false; lastX = e.clientX; lastY = e.clientY; });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const rect = canvas.getBoundingClientRect();
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    const f = mmView.vw / rect.width; // 统一缩放因子（Canvas 用等比变换）
+    mmView.vx -= dx * f;
+    mmView.vy -= dy * f;
+    lastX = e.clientX; lastY = e.clientY;
+    drawMindmapCanvas();
+  });
+  const endDrag = () => { dragging = false; };
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointerleave', endDrag);
+  canvas.addEventListener('click', (e) => {
+    if (moved) return;
+    const rect = canvas.getBoundingClientRect();
+    const cssW = rect.width, cssH = rect.height;
+    const s = mmView.vw > 0 ? cssW / mmView.vw : 1;
+    const offY = (cssH - mmView.vh * s) / 2;
+    const cx = mmView.vx + (e.clientX - rect.left) / s;
+    const cy = mmView.vy + (e.clientY - rect.top - offY) / s;
+    let found = null;
+    for (let i = mmNodes.length - 1; i >= 0; i--) {
+      const n = mmNodes[i].n;
+      if (cx >= n.x && cx <= n.x + n.w && cy >= n.y - n.h / 2 && cy <= n.y + n.h / 2) { found = mmNodes[i]; break; }
+    }
+    if (!found) return;
+    if (found.collapsible && cx <= found.n.x + 18 && cy <= found.n.y - found.n.h / 2 + 18) toggleMindmapNode(found._id);
+    else scrollToSectionFromMindmap(found._id);
+  });
+}
+
+// 离屏全图渲染（用于 Canvas 模式下导出 PNG/SVG，忽略当前视图）
+function renderCanvasOffscreen(scale) {
+  layoutMindmap(mindmapData);
+  const c = document.createElement('canvas');
+  c.width = mmDims.W * scale; c.height = mmDims.H * scale;
+  const ctx = c.getContext('2d');
+  paintCanvas(ctx, 0, 0, scale, 0, 0, mmDims.W * scale, mmDims.H * scale);
+  return c;
 }
 
 function downloadMindmap(fmt) {
+  if (mmUseCanvas) {
+    if (fmt === 'svg') {
+      const xml = buildMindmapSvgString(); // Canvas 模式直接由布局生成 SVG
+      const url = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }));
+      triggerDownload(url, 'LiveWiki_思维导图.svg');
+      return;
+    }
+    const c = renderCanvasOffscreen(2); // 离屏全图（忽略视图）导出 PNG
+    c.toBlob(b => {
+      const png = URL.createObjectURL(b);
+      triggerDownload(png, 'LiveWiki_思维导图.png');
+      setTimeout(() => URL.revokeObjectURL(png), 2000);
+    }, 'image/png');
+    return;
+  }
   const svg = document.querySelector('#mindmapSvgWrap svg');
   if (!svg) { alert('请先生成思维导图'); return; }
   // 导出完整脑图（忽略当前缩放/平移视图），并补全宽高以保证 PNG 有确定像素尺寸
@@ -1146,6 +1332,8 @@ async function buildExportHtml() {
     clone.setAttribute('height', mmDims.H);
     clone.setAttribute('viewBox', '0 0 ' + mmDims.W + ' ' + mmDims.H);
     svgStr = clone.outerHTML;
+  } else if (mmUseCanvas) {
+    svgStr = buildMindmapSvgString(); // Canvas 模式下由布局直接生成矢量脑图
   }
   let css = '';
   try { css = await (await fetch('app.css')).text(); } catch (e) { css = ''; }
